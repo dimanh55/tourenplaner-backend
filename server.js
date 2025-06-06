@@ -70,7 +70,7 @@ function initializeDatabase() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // ✨ NEW: Create saved_routes table for persistent route storage
+    // Create saved_routes table for persistent route storage
     db.run(`CREATE TABLE IF NOT EXISTS saved_routes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -83,7 +83,7 @@ function initializeDatabase() {
         FOREIGN KEY (driver_id) REFERENCES drivers (id)
     )`);
 
-    // ✨ NEW: Create user_sessions table for session management
+    // Create user_sessions table for session management
     db.run(`CREATE TABLE IF NOT EXISTS user_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         token TEXT UNIQUE NOT NULL,
@@ -105,44 +105,51 @@ function initializeDatabase() {
 function insertSampleData() {
     const sampleAppointments = [
         {
-            customer: "BMW München",
+            customer: "Max Mustermann",
             address: "Petuelring 130, 80809 München",
             priority: "hoch",
             status: "bestätigt",
             duration: 3,
-            pipeline_days: 14
+            pipeline_days: 14,
+            notes: JSON.stringify({
+                invitee_name: "Max Mustermann",
+                company: "Mustermann GmbH",
+                customer_company: "BMW",
+                start_time: "2025-06-10 14:00",
+                custom_notes: "Wichtiger Testimonial-Termin",
+                source: "Sample Data"
+            })
         },
         {
-            customer: "Mercedes-Benz Berlin",
-            address: "Salzufer 1, 10587 Berlin",
+            customer: "Anna Schmidt",
+            address: "Salzufer 1, 10587 Berlin", 
             priority: "hoch",
             status: "bestätigt",
             duration: 3,
-            pipeline_days: 21
+            pipeline_days: 21,
+            notes: JSON.stringify({
+                invitee_name: "Anna Schmidt",
+                company: "Schmidt & Partner",
+                customer_company: "Mercedes-Benz",
+                start_time: "2025-06-11 10:00",
+                custom_notes: "Testimonial für neue Kampagne",
+                source: "Sample Data"
+            })
         },
         {
-            customer: "Volkswagen Wolfsburg",
+            customer: "Peter Weber",
             address: "Berliner Ring 2, 38440 Wolfsburg",
             priority: "mittel",
             status: "vorschlag",
             duration: 3,
-            pipeline_days: 7
-        },
-        {
-            customer: "Porsche Stuttgart",
-            address: "Porscheplatz 1, 70435 Stuttgart",
-            priority: "hoch",
-            status: "bestätigt",
-            duration: 4,
-            pipeline_days: 28
-        },
-        {
-            customer: "SAP Walldorf",
-            address: "Hasso-Plattner-Ring 7, 69190 Walldorf",
-            priority: "mittel",
-            status: "vorschlag",
-            duration: 2,
-            pipeline_days: 5
+            pipeline_days: 7,
+            notes: JSON.stringify({
+                invitee_name: "Peter Weber",
+                company: "Weber Industries",
+                customer_company: "Volkswagen",
+                custom_notes: "Noch zu terminieren",
+                source: "Sample Data"
+            })
         }
     ];
 
@@ -163,20 +170,20 @@ function insertSampleData() {
             apt.status,
             apt.duration,
             apt.pipeline_days,
-            'Sample data for Tourenplaner'
+            apt.notes
         ]);
     });
 
     stmt.finalize();
-    console.log('✅ Sample data inserted');
+    console.log('✅ Sample testimonial data inserted');
 }
 
-// ✨ NEW: Helper function to generate session tokens
+// Helper function to generate session tokens
 function generateSessionToken() {
     return 'railway-session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 }
 
-// ✨ NEW: Middleware to validate session tokens
+// Middleware to validate session tokens
 function validateSession(req, res, next) {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -205,14 +212,14 @@ function validateSession(req, res, next) {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'OK',
-        message: 'Tourenplaner Backend running on Railway!',
+        message: 'Testimonial Tourenplaner Backend running on Railway!',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
-        features: ['persistent_sessions', 'route_saving', 'csv_import']
+        features: ['persistent_sessions', 'route_saving', 'csv_import', 'testimonial_focused']
     });
 });
 
-// ✨ UPDATED: Authentication with session persistence
+// Authentication with session persistence
 app.post('/api/auth/login', function(req, res) {
     const password = req.body.password;
     
@@ -250,7 +257,7 @@ app.post('/api/auth/login', function(req, res) {
     }
 });
 
-// ✨ NEW: Validate existing session
+// Validate existing session
 app.get('/api/auth/validate', validateSession, (req, res) => {
     const userData = JSON.parse(req.session.user_data || '{}');
     res.json({
@@ -261,7 +268,7 @@ app.get('/api/auth/validate', validateSession, (req, res) => {
     });
 });
 
-// ✨ NEW: Logout endpoint
+// Logout endpoint
 app.post('/api/auth/logout', validateSession, (req, res) => {
     db.run("DELETE FROM user_sessions WHERE token = ?", [req.session.token], (err) => {
         if (err) {
@@ -274,7 +281,7 @@ app.post('/api/auth/logout', validateSession, (req, res) => {
 // Root route
 app.get('/', (req, res) => {
     res.json({
-        message: '🚀 Tourenplaner API is running!',
+        message: '🎬 Testimonial Tourenplaner API is running!',
         endpoints: [
             'GET /api/health',
             'POST /api/auth/login',
@@ -286,6 +293,7 @@ app.get('/', (req, res) => {
             'GET /api/routes/saved',
             'POST /api/routes/save',
             'DELETE /api/routes/:id',
+            'GET /api/routes/active/:weekStart',
             'POST /api/admin/seed',
             'POST /api/admin/preview-csv',
             'POST /api/admin/import-csv'
@@ -293,7 +301,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// Get appointments
+// Enhanced appointments endpoint to return parsed testimonial data
 app.get('/api/appointments', (req, res) => {
     db.all("SELECT * FROM appointments ORDER BY created_at DESC", (err, rows) => {
         if (err) {
@@ -301,7 +309,39 @@ app.get('/api/appointments', (req, res) => {
             res.status(500).json({ error: err.message });
             return;
         }
-        res.json(rows);
+        
+        // Parse notes JSON and enhance appointment data
+        const enhancedAppointments = rows.map(apt => {
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(apt.notes || '{}');
+            } catch (e) {
+                // Fallback for old format
+                parsedNotes = {
+                    invitee_name: apt.customer,
+                    company: '',
+                    customer_company: '',
+                    custom_notes: apt.notes || ''
+                };
+            }
+            
+            return {
+                ...apt,
+                // Core testimonial data
+                invitee_name: parsedNotes.invitee_name || apt.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || '',
+                // Timing info
+                start_time: parsedNotes.start_time || null,
+                end_time: parsedNotes.end_time || null,
+                // Additional info
+                custom_notes: parsedNotes.custom_notes || '',
+                // Keep original notes for compatibility
+                notes_parsed: parsedNotes
+            };
+        });
+        
+        res.json(enhancedAppointments);
     });
 });
 
@@ -342,6 +382,27 @@ app.post('/api/routes/optimize', (req, res) => {
             return;
         }
         
+        // Parse appointment data for optimization
+        const enhancedAppointments = appointments.map(apt => {
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(apt.notes || '{}');
+            } catch (e) {
+                parsedNotes = {
+                    invitee_name: apt.customer,
+                    company: '',
+                    customer_company: ''
+                };
+            }
+            
+            return {
+                ...apt,
+                invitee_name: parsedNotes.invitee_name || apt.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || ''
+            };
+        });
+        
         // Simple route optimization
         const weekDays = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
         const startDate = new Date(weekStart);
@@ -351,7 +412,7 @@ app.post('/api/routes/optimize', (req, res) => {
             date.setDate(startDate.getDate() + index);
             
             // Distribute appointments across days (max 2 per day)
-            const dayAppointments = appointments.slice(index * 2, (index + 1) * 2);
+            const dayAppointments = enhancedAppointments.slice(index * 2, (index + 1) * 2);
             
             const mappedAppointments = dayAppointments.map((apt, i) => ({
                 ...apt,
@@ -376,16 +437,17 @@ app.post('/api/routes/optimize', (req, res) => {
             totalHours: optimizedDays.reduce((sum, day) => sum + day.workTime + day.travelTime, 0),
             days: optimizedDays,
             optimizations: [
-                `${appointments.length} Termine erfolgreich eingeplant`,
+                `${enhancedAppointments.length} Testimonial-Termine erfolgreich eingeplant`,
                 'Arbeitszeiten optimiert (max. 40h/Woche)',
-                'Fahrzeiten minimiert durch intelligente Reihenfolge'
+                'Fahrzeiten minimiert durch intelligente Reihenfolge',
+                'Person-fokussierte Darstellung für bessere Übersicht'
             ],
             generatedAt: new Date().toISOString()
         };
 
-        // ✨ NEW: Auto-save the optimized route if requested
-        if (autoSave && appointments.length > 0) {
-            const routeName = `Automatisch: Woche ${weekStart}`;
+        // Auto-save the optimized route if requested
+        if (autoSave && enhancedAppointments.length > 0) {
+            const routeName = `Automatisch: Testimonials Woche ${weekStart}`;
             const routeDataStr = JSON.stringify(optimizedRoute);
             
             // First, deactivate all routes for this week
@@ -414,10 +476,10 @@ app.post('/api/routes/optimize', (req, res) => {
         res.json({
             success: true,
             route: optimizedRoute,
-            message: `Route für ${appointments.length} Termine optimiert`,
-            autoSaved: autoSave && appointments.length > 0,
+            message: `Route für ${enhancedAppointments.length} Testimonial-Termine optimiert`,
+            autoSaved: autoSave && enhancedAppointments.length > 0,
             stats: {
-                totalAppointments: appointments.length,
+                totalAppointments: enhancedAppointments.length,
                 scheduledAppointments: optimizedRoute.days.reduce((sum, day) => sum + day.appointments.length, 0),
                 totalHours: optimizedRoute.totalHours,
                 workDays: optimizedRoute.days.filter(day => day.appointments.length > 0).length
@@ -426,7 +488,7 @@ app.post('/api/routes/optimize', (req, res) => {
     });
 });
 
-// ✨ NEW: Get saved routes
+// Get saved routes
 app.get('/api/routes/saved', (req, res) => {
     const { weekStart } = req.query;
     
@@ -454,7 +516,7 @@ app.get('/api/routes/saved', (req, res) => {
     });
 });
 
-// ✨ NEW: Save a route manually
+// Save a route manually
 app.post('/api/routes/save', validateSession, (req, res) => {
     const { name, weekStart, driverId, routeData, makeActive = false } = req.body;
     
@@ -508,7 +570,7 @@ app.post('/api/routes/save', validateSession, (req, res) => {
     }
 });
 
-// ✨ NEW: Delete a saved route
+// Delete a saved route
 app.delete('/api/routes/:id', validateSession, (req, res) => {
     const routeId = req.params.id;
     
@@ -526,7 +588,7 @@ app.delete('/api/routes/:id', validateSession, (req, res) => {
     });
 });
 
-// ✨ NEW: Load active route for a week
+// Load active route for a week
 app.get('/api/routes/active/:weekStart', (req, res) => {
     const weekStart = req.params.weekStart;
     
@@ -551,58 +613,322 @@ app.get('/api/routes/active/:weekStart', (req, res) => {
     );
 });
 
+// CSV Preview with enhanced testimonial analysis
+app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: ',',
+            encoding: 'utf-8'
+        });
+
+        // Enhanced analysis with person-focused structure
+        const analysis = {
+            totalRows: parsed.data.length,
+            columns: parsed.meta.fields,
+            confirmedAppointments: 0,
+            proposalAppointments: 0,
+            onHoldAppointments: 0,
+            missingInvitee: 0,
+            sampleRows: parsed.data.slice(0, 5).map(row => ({
+                invitee_name: row['Invitee Name'],
+                company: row['Company'],
+                customer_company: row['Customer Company'],
+                has_appointment: !!(row['Start Date & Time'] && row['Start Date & Time'].trim()),
+                on_hold: !!(row['On Hold'] && row['On Hold'].trim()),
+                address: row['Adresse'] || `${row['Straße & Hausnr.'] || ''}, ${row['PLZ'] || ''} ${row['Ort'] || ''}`.trim()
+            }))
+        };
+
+        parsed.data.forEach(row => {
+            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                analysis.onHoldAppointments++;
+            } else if (!row['Invitee Name'] || row['Invitee Name'].trim() === '') {
+                analysis.missingInvitee++;
+            } else if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
+                analysis.confirmedAppointments++;
+            } else {
+                analysis.proposalAppointments++;
+            }
+        });
+
+        res.json({
+            success: true,
+            analysis: analysis,
+            message: 'CSV Vorschau erstellt - Testimonial Person-fokussierte Struktur',
+            data_structure: {
+                primary_name: 'Invitee Name (Person für Testimonial)',
+                company_info: 'Company (Firma der Person)',
+                client_info: 'Customer Company (Unser Kunde)',
+                valid_appointments: analysis.confirmedAppointments + analysis.proposalAppointments
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            error: 'CSV Analyse fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// CSV Import endpoint for testimonial data
+app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    console.log('📁 CSV Testimonial Import gestartet...');
+    
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: ',',
+            encoding: 'utf-8'
+        });
+
+        console.log(`📊 ${parsed.data.length} Zeilen gefunden`);
+
+        const processedAppointments = [];
+        let skippedCount = 0;
+        let confirmedCount = 0;
+        let proposalCount = 0;
+
+        parsed.data.forEach((row, index) => {
+            // Skip if "On Hold" is filled
+            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                console.log(`Skipping row ${index + 1}: On Hold = "${row['On Hold']}"`);
+                skippedCount++;
+                return;
+            }
+
+            // Skip if essential data missing - we need at least Invitee Name
+            if (!row['Invitee Name'] || row['Invitee Name'].trim() === '') {
+                console.log(`Skipping row ${index + 1}: Kein Invitee Name`);
+                skippedCount++;
+                return;
+            }
+
+            // Build address - prefer full address, fallback to components
+            let fullAddress = row['Adresse'] || '';
+            if (!fullAddress && row['Straße & Hausnr.']) {
+                const parts = [];
+                if (row['Straße & Hausnr.']) parts.push(row['Straße & Hausnr.']);
+                if (row['PLZ'] && row['Ort']) parts.push(`${row['PLZ']} ${row['Ort']}`);
+                else if (row['Ort']) parts.push(row['Ort']);
+                if (row['Land']) parts.push(row['Land']);
+                fullAddress = parts.join(', ');
+            }
+
+            // Determine status based on appointment date
+            const hasStartDate = row['Start Date & Time'] && row['Start Date & Time'].toString().trim() !== '';
+            const status = hasStartDate ? 'bestätigt' : 'vorschlag';
+            
+            if (status === 'bestätigt') confirmedCount++;
+            else proposalCount++;
+
+            // Extract company information
+            const inviteeName = row['Invitee Name'].trim();
+            const company = row['Company'] ? row['Company'].trim() : '';
+            const customerCompany = row['Customer Company'] ? row['Customer Company'].trim() : '';
+
+            // Priority logic - high priority for confirmed appointments and important customers
+            let priority = 'mittel';
+            if (status === 'bestätigt') {
+                priority = 'hoch';
+            } else if (customerCompany.toLowerCase().includes('bmw') || 
+                      customerCompany.toLowerCase().includes('mercedes') || 
+                      customerCompany.toLowerCase().includes('audi') || 
+                      customerCompany.toLowerCase().includes('porsche') || 
+                      customerCompany.toLowerCase().includes('volkswagen')) {
+                priority = 'hoch';
+            }
+
+            // Duration based on status and priority
+            const duration = status === 'bestätigt' ? 4 : (priority === 'hoch' ? 3 : 2);
+
+            // Create appointment object with proper testimonial structure
+            const appointment = {
+                // Main identifier: Person name
+                customer: inviteeName,
+                // Full address
+                address: fullAddress || 'Adresse nicht verfügbar',
+                // Status and priority
+                priority: priority,
+                status: status,
+                duration: duration,
+                // Pipeline calculation
+                pipeline_days: status === 'vorschlag' ? Math.floor(Math.random() * 30) + 1 : 7,
+                // Enhanced notes with all testimonial info
+                notes: JSON.stringify({
+                    invitee_name: inviteeName,
+                    company: company,
+                    customer_company: customerCompany,
+                    start_time: row['Start Date & Time'] || null,
+                    end_time: row['End Date & Time'] || null,
+                    custom_notes: row['Notiz'] || '',
+                    import_date: new Date().toISOString(),
+                    source: 'CSV Testimonial Import'
+                })
+            };
+
+            processedAppointments.push(appointment);
+            
+            console.log(`✅ Processed: ${inviteeName} (${company}) für ${customerCompany}`);
+        });
+
+        console.log(`📈 Processing complete: ${processedAppointments.length} testimonial appointments, ${skippedCount} skipped`);
+
+        // Clear existing appointments and insert new ones
+        db.run("DELETE FROM appointments", (err) => {
+            if (err) {
+                return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
+            }
+
+            console.log('🧹 Cleared existing appointments');
+
+            const stmt = db.prepare(`INSERT INTO appointments 
+                (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+            let insertedCount = 0;
+            let errors = [];
+
+            processedAppointments.forEach((apt) => {
+                stmt.run([
+                    apt.customer, 
+                    apt.address, 
+                    apt.priority, 
+                    apt.status, 
+                    apt.duration, 
+                    apt.pipeline_days, 
+                    apt.notes,
+                    JSON.stringify([]), 
+                    JSON.stringify([])
+                ], (err) => {
+                    if (err) {
+                        errors.push(`${apt.customer}: ${err.message}`);
+                        console.error(`❌ Insert error for ${apt.customer}:`, err);
+                    } else {
+                        insertedCount++;
+                    }
+                    
+                    // Send response when all insertions are complete
+                    if (insertedCount + errors.length === processedAppointments.length) {
+                        stmt.finalize();
+                        
+                        console.log(`🎉 Testimonial Import complete: ${insertedCount} inserted, ${errors.length} errors`);
+                        
+                        res.json({
+                            success: true,
+                            message: 'CSV Testimonial Import erfolgreich abgeschlossen',
+                            stats: {
+                                totalRows: parsed.data.length,
+                                processed: processedAppointments.length,
+                                inserted: insertedCount,
+                                confirmed: confirmedCount,
+                                proposals: proposalCount,
+                                skipped: skippedCount,
+                                errors: errors.length
+                            },
+                            sample_data: processedAppointments.slice(0, 3).map(apt => ({
+                                name: apt.customer,
+                                notes_preview: JSON.parse(apt.notes)
+                            })),
+                            errors: errors.length > 0 ? errors.slice(0, 5) : undefined
+                        });
+                    }
+                });
+            });
+
+            // Handle case where no appointments to process
+            if (processedAppointments.length === 0) {
+                stmt.finalize();
+                res.json({
+                    success: false,
+                    message: 'Keine gültigen Testimonial-Termine in der CSV gefunden',
+                    stats: {
+                        totalRows: parsed.data.length,
+                        skipped: skippedCount
+                    },
+                    debug_info: {
+                        sample_rows: parsed.data.slice(0, 3),
+                        required_columns: ['Invitee Name'],
+                        found_columns: parsed.meta.fields
+                    }
+                });
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ CSV Testimonial Import Fehler:', error);
+        res.status(500).json({
+            error: 'CSV Testimonial Import fehlgeschlagen',
+            details: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});
+
 // Admin endpoint to seed database manually
 app.all('/api/admin/seed', (req, res) => {
     console.log('🌱 Admin seed endpoint called');
     
     const sampleAppointments = [
         {
-            customer: "BMW München",
+            customer: "Max Mustermann",
             address: "Petuelring 130, 80809 München",
             priority: "hoch",
             status: "bestätigt",
             duration: 3,
-            pipeline_days: 14
+            pipeline_days: 14,
+            notes: JSON.stringify({
+                invitee_name: "Max Mustermann",
+                company: "Mustermann GmbH",
+                customer_company: "BMW",
+                start_time: "2025-06-10 14:00",
+                custom_notes: "Wichtiger Testimonial-Termin",
+                source: "Sample Data"
+            })
         },
         {
-            customer: "Mercedes-Benz Berlin",
+            customer: "Anna Schmidt",
             address: "Salzufer 1, 10587 Berlin",
             priority: "hoch",
             status: "bestätigt",
             duration: 3,
-            pipeline_days: 21
+            pipeline_days: 21,
+            notes: JSON.stringify({
+                invitee_name: "Anna Schmidt",
+                company: "Schmidt & Partner",
+                customer_company: "Mercedes-Benz",
+                start_time: "2025-06-11 10:00",
+                custom_notes: "Testimonial für neue Kampagne",
+                source: "Sample Data"
+            })
         },
         {
-            customer: "Volkswagen Wolfsburg",
+            customer: "Peter Weber",
             address: "Berliner Ring 2, 38440 Wolfsburg",
             priority: "mittel",
             status: "vorschlag",
             duration: 3,
-            pipeline_days: 7
-        },
-        {
-            customer: "Porsche Stuttgart",
-            address: "Porscheplatz 1, 70435 Stuttgart",
-            priority: "hoch",
-            status: "bestätigt",
-            duration: 4,
-            pipeline_days: 28
-        },
-        {
-            customer: "SAP Walldorf",
-            address: "Hasso-Plattner-Ring 7, 69190 Walldorf",
-            priority: "mittel",
-            status: "vorschlag",
-            duration: 2,
-            pipeline_days: 5
-        },
-        {
-            customer: "Audi Ingolstadt",
-            address: "AUTO UNION STRASSE 1, 85045 Ingolstadt",
-            priority: "mittel",
-            status: "vorschlag",
-            duration: 3,
-            pipeline_days: 10
+            pipeline_days: 7,
+            notes: JSON.stringify({
+                invitee_name: "Peter Weber",
+                company: "Weber Industries",
+                customer_company: "Volkswagen",
+                custom_notes: "Noch zu terminieren",
+                source: "Sample Data"
+            })
         }
     ];
 
@@ -638,7 +964,7 @@ app.all('/api/admin/seed', (req, res) => {
                 apt.status,
                 apt.duration,
                 apt.pipeline_days,
-                'Admin seeded data'
+                apt.notes
             ], (err) => {
                 if (err) {
                     console.error(`Error inserting ${apt.customer}:`, err);
@@ -650,7 +976,7 @@ app.all('/api/admin/seed', (req, res) => {
                     if (insertedCount === sampleAppointments.length) {
                         res.json({
                             success: true,
-                            message: `${sampleAppointments.length} Termine erfolgreich eingefügt`,
+                            message: `${sampleAppointments.length} Testimonial-Termine erfolgreich eingefügt`,
                             appointments: sampleAppointments.map(apt => apt.customer)
                         });
                     }
@@ -687,205 +1013,12 @@ app.get('/api/admin/status', (req, res) => {
                     appointments_count: row.count,
                     drivers_count: row2.driver_count,
                     saved_routes_count: row3.routes_count,
-                    database_path: dbPath
+                    database_path: dbPath,
+                    type: 'testimonial_focused'
                 });
             });
         });
     });
-});
-
-// CSV Preview endpoint
-app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
-    }
-
-    try {
-        const csvContent = req.file.buffer.toString('utf-8');
-        const parsed = Papa.parse(csvContent, {
-            header: true,
-            skipEmptyLines: true,
-            delimiter: ',',
-            encoding: 'utf-8'
-        });
-
-        // Analyze the data
-        const analysis = {
-            totalRows: parsed.data.length,
-            columns: parsed.meta.fields,
-            confirmedAppointments: 0,
-            proposalAppointments: 0,
-            onHoldAppointments: 0,
-            missingData: 0,
-            sampleRows: parsed.data.slice(0, 5)
-        };
-
-        parsed.data.forEach(row => {
-            if (row['On Hold'] && row['On Hold'].trim() !== '') {
-                analysis.onHoldAppointments++;
-            } else if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
-                analysis.confirmedAppointments++;
-            } else if (row['Customer Company'] || row['Invitee Name']) {
-                analysis.proposalAppointments++;
-            } else {
-                analysis.missingData++;
-            }
-        });
-
-        res.json({
-            success: true,
-            analysis: analysis,
-            message: 'CSV Vorschau erstellt'
-        });
-
-    } catch (error) {
-        res.status(500).json({
-            error: 'CSV Analyse fehlgeschlagen',
-            details: error.message
-        });
-    }
-});
-
-// CSV Import endpoint
-app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
-    }
-
-    console.log('📁 CSV Import gestartet...');
-    
-    try {
-        const csvContent = req.file.buffer.toString('utf-8');
-        const parsed = Papa.parse(csvContent, {
-            header: true,
-            skipEmptyLines: true,
-            delimiter: ',',
-            encoding: 'utf-8'
-        });
-
-        console.log(`📊 ${parsed.data.length} Zeilen gefunden`);
-
-        const processedAppointments = [];
-        let skippedCount = 0;
-        let confirmedCount = 0;
-        let proposalCount = 0;
-
-        parsed.data.forEach((row, index) => {
-            // Skip if "On Hold" is filled
-            if (row['On Hold'] && row['On Hold'].trim() !== '') {
-                skippedCount++;
-                return;
-            }
-
-            // Skip if essential data missing
-            if (!row['Customer Company'] && !row['Invitee Name']) {
-                skippedCount++;
-                return;
-            }
-
-            // Build address
-            let fullAddress = row['Adresse'] || '';
-            if (!fullAddress && row['Straße & Hausnr.']) {
-                const parts = [];
-                if (row['Straße & Hausnr.']) parts.push(row['Straße & Hausnr.']);
-                if (row['PLZ'] && row['Ort']) parts.push(`${row['PLZ']} ${row['Ort']}`);
-                if (row['Land']) parts.push(row['Land']);
-                fullAddress = parts.join(', ');
-            }
-
-            // Determine status
-            const hasStartDate = row['Start Date & Time'] && row['Start Date & Time'].toString().trim() !== '';
-            const status = hasStartDate ? 'bestätigt' : 'vorschlag';
-            
-            if (status === 'bestätigt') confirmedCount++;
-            else proposalCount++;
-
-            // Priority logic
-            let priority = 'mittel';
-            const company = (row['Customer Company'] || '').toLowerCase();
-            if (company.includes('bmw') || company.includes('mercedes') || company.includes('audi') || 
-                company.includes('porsche') || company.includes('volkswagen')) {
-                priority = 'hoch';
-            }
-
-            const appointment = {
-                customer: row['Customer Company'] || row['Invitee Name'],
-                address: fullAddress || 'Adresse nicht verfügbar',
-                priority: priority,
-                status: status,
-                duration: priority === 'hoch' ? 4 : 3,
-                pipeline_days: status === 'vorschlag' ? Math.floor(Math.random() * 30) + 1 : 7,
-                notes: `CSV Import - ${row['Notiz'] || 'Keine Notizen'}`
-            };
-
-            processedAppointments.push(appointment);
-        });
-
-        // Clear and insert
-        db.run("DELETE FROM appointments", (err) => {
-            if (err) {
-                return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
-            }
-
-            const stmt = db.prepare(`INSERT INTO appointments 
-                (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-
-            let insertedCount = 0;
-            let errors = [];
-
-            processedAppointments.forEach((apt) => {
-                stmt.run([
-                    apt.customer, apt.address, apt.priority, apt.status, 
-                    apt.duration, apt.pipeline_days, apt.notes,
-                    JSON.stringify([]), JSON.stringify([])
-                ], (err) => {
-                    if (err) {
-                        errors.push(`${apt.customer}: ${err.message}`);
-                    } else {
-                        insertedCount++;
-                    }
-                    
-                    if (insertedCount + errors.length === processedAppointments.length) {
-                        stmt.finalize();
-                        res.json({
-                            success: true,
-                            message: 'CSV Import abgeschlossen',
-                            stats: {
-                                totalRows: parsed.data.length,
-                                processed: processedAppointments.length,
-                                inserted: insertedCount,
-                                confirmed: confirmedCount,
-                                proposals: proposalCount,
-                                skipped: skippedCount,
-                                errors: errors.length
-                            },
-                            errors: errors.length > 0 ? errors : undefined
-                        });
-                    }
-                });
-            });
-
-            if (processedAppointments.length === 0) {
-                stmt.finalize();
-                res.json({
-                    success: false,
-                    message: 'Keine gültigen Termine in der CSV gefunden',
-                    stats: {
-                        totalRows: parsed.data.length,
-                        skipped: skippedCount
-                    }
-                });
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ CSV Import Fehler:', error);
-        res.status(500).json({
-            error: 'CSV Import fehlgeschlagen',
-            details: error.message
-        });
-    }
 });
 
 // Error handling
@@ -901,10 +1034,10 @@ app.use('*', (req, res) => {
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Tourenplaner Server running on port ${PORT}`);
+    console.log(`🚀 Testimonial Tourenplaner Server running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-    console.log(`✨ New features: Session persistence, Route saving`);
+    console.log(`✨ Features: Session persistence, Route saving, Testimonial-focused CSV import`);
 });
 
 // Graceful shutdown
