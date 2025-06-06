@@ -10,9 +10,9 @@ const PORT = process.env.PORT || 8080;
 
 // Middleware
 app.use(cors({
-    origin: ['https://expertise-zeigen.de', 'https://www.expertise-zeigen.de', '*'],
+    origin: ['https://expertise-zeigen.de', 'https://www.expertise-zeigen.de'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'multipart/form-data'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: false
 }));
 app.use(express.json());
