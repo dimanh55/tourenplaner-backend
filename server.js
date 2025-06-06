@@ -161,7 +161,8 @@ app.get('/', (req, res) => {
             'POST /api/auth/login',
             'GET /api/appointments',
             'GET /api/drivers',
-            'POST /api/routes/optimize'
+            'POST /api/routes/optimize',
+            'POST /api/admin/seed'
         ]
     });
 });
@@ -282,6 +283,141 @@ app.post('/api/routes/optimize', (req, res) => {
                 totalHours: optimizedRoute.totalHours,
                 workDays: optimizedRoute.days.filter(day => day.appointments.length > 0).length
             }
+        });
+    });
+});
+
+// Admin endpoint to seed database manually
+app.post('/api/admin/seed', (req, res) => {
+    console.log('🌱 Admin seed endpoint called');
+    
+    const sampleAppointments = [
+        {
+            customer: "BMW München",
+            address: "Petuelring 130, 80809 München",
+            priority: "hoch",
+            status: "bestätigt",
+            duration: 3,
+            pipeline_days: 14
+        },
+        {
+            customer: "Mercedes-Benz Berlin",
+            address: "Salzufer 1, 10587 Berlin",
+            priority: "hoch",
+            status: "bestätigt",
+            duration: 3,
+            pipeline_days: 21
+        },
+        {
+            customer: "Volkswagen Wolfsburg",
+            address: "Berliner Ring 2, 38440 Wolfsburg",
+            priority: "mittel",
+            status: "vorschlag",
+            duration: 3,
+            pipeline_days: 7
+        },
+        {
+            customer: "Porsche Stuttgart",
+            address: "Porscheplatz 1, 70435 Stuttgart",
+            priority: "hoch",
+            status: "bestätigt",
+            duration: 4,
+            pipeline_days: 28
+        },
+        {
+            customer: "SAP Walldorf",
+            address: "Hasso-Plattner-Ring 7, 69190 Walldorf",
+            priority: "mittel",
+            status: "vorschlag",
+            duration: 2,
+            pipeline_days: 5
+        },
+        {
+            customer: "Audi Ingolstadt",
+            address: "AUTO UNION STRASSE 1, 85045 Ingolstadt",
+            priority: "mittel",
+            status: "vorschlag",
+            duration: 3,
+            pipeline_days: 10
+        }
+    ];
+
+    // Clear and insert sample data
+    db.run("DELETE FROM appointments", (err) => {
+        if (err) {
+            console.error('Error clearing appointments:', err);
+            res.status(500).json({ error: err.message });
+            return;
+        }
+
+        console.log('🧹 Cleared existing appointments');
+
+        // Insert driver if not exists
+        db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
+                VALUES (1, 'Max Mustermann', 'Hannover')`, (err) => {
+            if (err) {
+                console.error('Error inserting driver:', err);
+            }
+        });
+
+        // Insert sample appointments
+        const stmt = db.prepare(`INSERT INTO appointments 
+            (customer, address, priority, status, duration, pipeline_days, notes) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)`);
+
+        let insertedCount = 0;
+        sampleAppointments.forEach((apt, index) => {
+            stmt.run([
+                apt.customer,
+                apt.address,
+                apt.priority,
+                apt.status,
+                apt.duration,
+                apt.pipeline_days,
+                'Admin seeded data'
+            ], (err) => {
+                if (err) {
+                    console.error(`Error inserting ${apt.customer}:`, err);
+                } else {
+                    insertedCount++;
+                    console.log(`✅ Inserted: ${apt.customer}`);
+                    
+                    // Send response when all are inserted
+                    if (insertedCount === sampleAppointments.length) {
+                        res.json({
+                            success: true,
+                            message: `${sampleAppointments.length} Termine erfolgreich eingefügt`,
+                            appointments: sampleAppointments.map(apt => apt.customer)
+                        });
+                    }
+                }
+            });
+        });
+
+        stmt.finalize();
+    });
+});
+
+// Admin endpoint to check database status
+app.get('/api/admin/status', (req, res) => {
+    db.get("SELECT COUNT(*) as count FROM appointments", (err, row) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        db.get("SELECT COUNT(*) as driver_count FROM drivers", (err2, row2) => {
+            if (err2) {
+                res.status(500).json({ error: err2.message });
+                return;
+            }
+            
+            res.json({
+                database: 'connected',
+                appointments_count: row.count,
+                drivers_count: row2.driver_count,
+                database_path: dbPath
+            });
         });
     });
 });
