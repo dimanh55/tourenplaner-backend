@@ -70,6 +70,28 @@ function initializeDatabase() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
+    // ✨ NEW: Create saved_routes table for persistent route storage
+    db.run(`CREATE TABLE IF NOT EXISTS saved_routes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        week_start DATE NOT NULL,
+        driver_id INTEGER,
+        route_data TEXT NOT NULL,
+        is_active INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (driver_id) REFERENCES drivers (id)
+    )`);
+
+    // ✨ NEW: Create user_sessions table for session management
+    db.run(`CREATE TABLE IF NOT EXISTS user_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token TEXT UNIQUE NOT NULL,
+        user_data TEXT,
+        expires_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
     // Insert sample data if tables are empty
     db.get("SELECT COUNT(*) as count FROM appointments", (err, row) => {
         if (!err && row.count === 0) {
@@ -77,7 +99,7 @@ function initializeDatabase() {
         }
     });
 
-    console.log('✅ Database tables initialized');
+    console.log('✅ Database tables initialized (including saved_routes and user_sessions)');
 }
 
 function insertSampleData() {
@@ -149,6 +171,34 @@ function insertSampleData() {
     console.log('✅ Sample data inserted');
 }
 
+// ✨ NEW: Helper function to generate session tokens
+function generateSessionToken() {
+    return 'railway-session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+}
+
+// ✨ NEW: Middleware to validate session tokens
+function validateSession(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No valid session token' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    
+    db.get(
+        "SELECT * FROM user_sessions WHERE token = ? AND (expires_at IS NULL OR expires_at > datetime('now'))",
+        [token],
+        (err, session) => {
+            if (err || !session) {
+                return res.status(401).json({ error: 'Invalid or expired session' });
+            }
+            
+            req.session = session;
+            next();
+        }
+    );
+}
+
 // Routes
 
 // Health check
@@ -157,23 +207,68 @@ app.get('/api/health', (req, res) => {
         status: 'OK',
         message: 'Tourenplaner Backend running on Railway!',
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
+        environment: process.env.NODE_ENV || 'development',
+        features: ['persistent_sessions', 'route_saving', 'csv_import']
     });
 });
 
-// Authentication
+// ✨ UPDATED: Authentication with session persistence
 app.post('/api/auth/login', function(req, res) {
     const password = req.body.password;
     
     if (password === 'testimonials2025') {
-        res.json({
-            token: 'railway-token-' + Date.now(),
-            user: { name: 'Admin', role: 'admin' },
-            message: 'Login successful'
+        const token = generateSessionToken();
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 7); // 7 days from now
+        
+        const userData = JSON.stringify({
+            name: 'Admin',
+            role: 'admin',
+            loginTime: new Date().toISOString()
         });
+
+        // Save session to database
+        db.run(
+            "INSERT INTO user_sessions (token, user_data, expires_at) VALUES (?, ?, ?)",
+            [token, userData, expiresAt.toISOString()],
+            function(err) {
+                if (err) {
+                    console.error('Session save error:', err);
+                    return res.status(500).json({ error: 'Session creation failed' });
+                }
+
+                res.json({
+                    token: token,
+                    user: { name: 'Admin', role: 'admin' },
+                    expiresAt: expiresAt.toISOString(),
+                    message: 'Login successful - Session wird 7 Tage gespeichert'
+                });
+            }
+        );
     } else {
         res.status(401).json({ error: 'Invalid password' });
     }
+});
+
+// ✨ NEW: Validate existing session
+app.get('/api/auth/validate', validateSession, (req, res) => {
+    const userData = JSON.parse(req.session.user_data || '{}');
+    res.json({
+        valid: true,
+        user: userData,
+        token: req.session.token,
+        expiresAt: req.session.expires_at
+    });
+});
+
+// ✨ NEW: Logout endpoint
+app.post('/api/auth/logout', validateSession, (req, res) => {
+    db.run("DELETE FROM user_sessions WHERE token = ?", [req.session.token], (err) => {
+        if (err) {
+            console.error('Logout error:', err);
+        }
+        res.json({ message: 'Logged out successfully' });
+    });
 });
 
 // Root route
@@ -183,9 +278,14 @@ app.get('/', (req, res) => {
         endpoints: [
             'GET /api/health',
             'POST /api/auth/login',
+            'GET /api/auth/validate',
+            'POST /api/auth/logout',
             'GET /api/appointments',
             'GET /api/drivers',
             'POST /api/routes/optimize',
+            'GET /api/routes/saved',
+            'POST /api/routes/save',
+            'DELETE /api/routes/:id',
             'POST /api/admin/seed',
             'POST /api/admin/preview-csv',
             'POST /api/admin/import-csv'
@@ -228,7 +328,7 @@ app.get('/api/drivers', (req, res) => {
 
 // Route optimization
 app.post('/api/routes/optimize', (req, res) => {
-    const { weekStart, driverId } = req.body;
+    const { weekStart, driverId, autoSave = true } = req.body;
     
     if (!weekStart) {
         return res.status(400).json({ error: 'weekStart is required' });
@@ -279,8 +379,35 @@ app.post('/api/routes/optimize', (req, res) => {
                 `${appointments.length} Termine erfolgreich eingeplant`,
                 'Arbeitszeiten optimiert (max. 40h/Woche)',
                 'Fahrzeiten minimiert durch intelligente Reihenfolge'
-            ]
+            ],
+            generatedAt: new Date().toISOString()
         };
+
+        // ✨ NEW: Auto-save the optimized route if requested
+        if (autoSave && appointments.length > 0) {
+            const routeName = `Automatisch: Woche ${weekStart}`;
+            const routeDataStr = JSON.stringify(optimizedRoute);
+            
+            // First, deactivate all routes for this week
+            db.run(
+                "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
+                [weekStart],
+                () => {
+                    // Then save the new route as active
+                    db.run(
+                        "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 1)",
+                        [routeName, weekStart, driverId || 1, routeDataStr],
+                        function(err) {
+                            if (err) {
+                                console.error('Auto-save route error:', err);
+                            } else {
+                                console.log(`✅ Route auto-saved with ID: ${this.lastID}`);
+                            }
+                        }
+                    );
+                }
+            );
+        }
 
         console.log('✅ Route optimization completed');
 
@@ -288,6 +415,7 @@ app.post('/api/routes/optimize', (req, res) => {
             success: true,
             route: optimizedRoute,
             message: `Route für ${appointments.length} Termine optimiert`,
+            autoSaved: autoSave && appointments.length > 0,
             stats: {
                 totalAppointments: appointments.length,
                 scheduledAppointments: optimizedRoute.days.reduce((sum, day) => sum + day.appointments.length, 0),
@@ -296,6 +424,131 @@ app.post('/api/routes/optimize', (req, res) => {
             }
         });
     });
+});
+
+// ✨ NEW: Get saved routes
+app.get('/api/routes/saved', (req, res) => {
+    const { weekStart } = req.query;
+    
+    let query = "SELECT * FROM saved_routes ORDER BY created_at DESC";
+    let params = [];
+    
+    if (weekStart) {
+        query = "SELECT * FROM saved_routes WHERE week_start = ? ORDER BY created_at DESC";
+        params = [weekStart];
+    }
+    
+    db.all(query, params, (err, routes) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        // Parse route_data for each route
+        const parsedRoutes = routes.map(route => ({
+            ...route,
+            route_data: JSON.parse(route.route_data)
+        }));
+        
+        res.json(parsedRoutes);
+    });
+});
+
+// ✨ NEW: Save a route manually
+app.post('/api/routes/save', validateSession, (req, res) => {
+    const { name, weekStart, driverId, routeData, makeActive = false } = req.body;
+    
+    if (!name || !weekStart || !routeData) {
+        return res.status(400).json({ error: 'Name, weekStart and routeData are required' });
+    }
+    
+    const routeDataStr = JSON.stringify(routeData);
+    
+    if (makeActive) {
+        // Deactivate other routes for this week first
+        db.run(
+            "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
+            [weekStart],
+            () => {
+                // Insert new active route
+                db.run(
+                    "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 1)",
+                    [name, weekStart, driverId || 1, routeDataStr],
+                    function(err) {
+                        if (err) {
+                            res.status(500).json({ error: err.message });
+                        } else {
+                            res.json({
+                                success: true,
+                                routeId: this.lastID,
+                                message: 'Route gespeichert und aktiviert'
+                            });
+                        }
+                    }
+                );
+            }
+        );
+    } else {
+        // Just insert without making active
+        db.run(
+            "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 0)",
+            [name, weekStart, driverId || 1, routeDataStr],
+            function(err) {
+                if (err) {
+                    res.status(500).json({ error: err.message });
+                } else {
+                    res.json({
+                        success: true,
+                        routeId: this.lastID,
+                        message: 'Route gespeichert'
+                    });
+                }
+            }
+        );
+    }
+});
+
+// ✨ NEW: Delete a saved route
+app.delete('/api/routes/:id', validateSession, (req, res) => {
+    const routeId = req.params.id;
+    
+    db.run("DELETE FROM saved_routes WHERE id = ?", [routeId], function(err) {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else if (this.changes === 0) {
+            res.status(404).json({ error: 'Route not found' });
+        } else {
+            res.json({
+                success: true,
+                message: 'Route gelöscht'
+            });
+        }
+    });
+});
+
+// ✨ NEW: Load active route for a week
+app.get('/api/routes/active/:weekStart', (req, res) => {
+    const weekStart = req.params.weekStart;
+    
+    db.get(
+        "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
+        [weekStart],
+        (err, route) => {
+            if (err) {
+                res.status(500).json({ error: err.message });
+            } else if (!route) {
+                res.json({ found: false, message: 'Keine aktive Route für diese Woche' });
+            } else {
+                res.json({
+                    found: true,
+                    route: {
+                        ...route,
+                        route_data: JSON.parse(route.route_data)
+                    }
+                });
+            }
+        }
+    );
 });
 
 // Admin endpoint to seed database manually
@@ -423,11 +676,19 @@ app.get('/api/admin/status', (req, res) => {
                 return;
             }
             
-            res.json({
-                database: 'connected',
-                appointments_count: row.count,
-                drivers_count: row2.driver_count,
-                database_path: dbPath
+            db.get("SELECT COUNT(*) as routes_count FROM saved_routes", (err3, row3) => {
+                if (err3) {
+                    res.status(500).json({ error: err3.message });
+                    return;
+                }
+                
+                res.json({
+                    database: 'connected',
+                    appointments_count: row.count,
+                    drivers_count: row2.driver_count,
+                    saved_routes_count: row3.routes_count,
+                    database_path: dbPath
+                });
             });
         });
     });
@@ -643,6 +904,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Tourenplaner Server running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+    console.log(`✨ New features: Session persistence, Route saving`);
 });
 
 // Graceful shutdown
