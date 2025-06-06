@@ -292,6 +292,47 @@ app.post('/api/auth/login', function(req, res) {
     }
 });
 
+// Get appointments
+app.get('/api/appointments', (req, res) => {
+    db.all("SELECT * FROM appointments ORDER BY created_at DESC", (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        // Parse notes and enhance appointment data
+        const enhancedRows = rows.map(row => {
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(row.notes || '{}');
+            } catch (e) {
+                parsedNotes = {};
+            }
+            
+            return {
+                ...row,
+                invitee_name: parsedNotes.invitee_name || row.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || '',
+                start_time: parsedNotes.start_time || null
+            };
+        });
+        
+        res.json(enhancedRows);
+    });
+});
+
+// Get drivers
+app.get('/api/drivers', (req, res) => {
+    db.all("SELECT * FROM drivers", (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        res.json(rows);
+    });
+});
+
 // Validate existing session
 app.post('/api/routes/optimize', validateSession, async (req, res) => {
     const { weekStart, driverId, autoSave = true } = req.body;
@@ -505,365 +546,6 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
                 optimizations: [`Fehler: ${error.message}`],
                 stats: { totalAppointments: 0, confirmedAppointments: 0, proposalAppointments: 0, totalTravelTime: 0, workDays: 0 }
             }
-        });
-    }
-});
-
-        // Termine intelligent auf Tage verteilen
-        let currentDayIndex = 0;
-        let currentTime = 8; // Start um 8:00
-
-        for (const apt of sortedAppointments) {
-            // Prüfe ob aktueller Tag noch Platz hat
-            const currentDay = optimizedDays[currentDayIndex];
-            
-            // Max 2 Termine pro Tag oder max 8h Arbeitszeit
-            if (currentDay.appointments.length >= 2 || currentDay.workTime >= 8) {
-                currentDayIndex++;
-                currentTime = 8; // Reset time for new day
-                
-                // Wenn alle Tage voll sind, stoppe
-                if (currentDayIndex >= optimizedDays.length) {
-                    console.log('⚠️ Alle Wochentage sind voll - weitere Termine werden nicht eingeplant');
-                    break;
-                }
-            }
-
-            const day = optimizedDays[currentDayIndex];
-            
-            // Parse appointment notes
-            let parsedNotes = {};
-            try {
-                parsedNotes = JSON.parse(apt.notes || '{}');
-            } catch (e) {
-                parsedNotes = {};
-            }
-
-            // Fahrt zum Termin berechnen (vereinfacht)
-            const travelTimeToAppointment = day.appointments.length === 0 ? 1.5 : 0.5; // Erste Fahrt länger
-            
-            // Fahrt-Segment hinzufügen
-            if (day.appointments.length === 0) {
-                // Erste Fahrt von Hannover
-                day.travelSegments.push({
-                    type: 'travel',
-                    from: 'Hannover',
-                    to: parsedNotes.invitee_name || apt.customer,
-                    startTime: formatTime(currentTime),
-                    endTime: formatTime(currentTime + travelTimeToAppointment),
-                    duration: travelTimeToAppointment,
-                    distance: '120 km',
-                    description: `Fahrt zum Termin, ${formatTime(currentTime + travelTimeToAppointment)}`
-                });
-            } else {
-                // Fahrt zwischen Terminen
-                const lastApt = day.appointments[day.appointments.length - 1];
-                day.travelSegments.push({
-                    type: 'travel',
-                    from: lastApt.invitee_name || lastApt.customer,
-                    to: parsedNotes.invitee_name || apt.customer,
-                    startTime: formatTime(currentTime),
-                    endTime: formatTime(currentTime + travelTimeToAppointment),
-                    duration: travelTimeToAppointment,
-                    distance: '45 km',
-                    description: `Fahrt nach ${apt.address?.split(',')[0] || 'nächstem Termin'}`
-                });
-            }
-            
-            currentTime += travelTimeToAppointment;
-
-            // Termin hinzufügen
-            const appointment = {
-                ...apt,
-                invitee_name: parsedNotes.invitee_name || apt.customer,
-                company: parsedNotes.company || '',
-                customer_company: parsedNotes.customer_company || '',
-                startTime: formatTime(currentTime),
-                endTime: formatTime(currentTime + 3),
-                duration: 3,
-                status: apt.status,
-                customer: parsedNotes.invitee_name || apt.customer // Für Frontend-Kompatibilität
-            };
-
-            day.appointments.push(appointment);
-            
-            currentTime += 3; // 3h Termin
-            day.workTime += 3;
-            day.travelTime += travelTimeToAppointment;
-            
-            console.log(`📅 Eingeplant: ${appointment.invitee_name} → ${day.day} ${appointment.startTime}`);
-
-            // Pause nach Termin (falls nicht letzter Termin des Tages)
-            if (day.appointments.length === 1 && currentDayIndex < 4) { // Nur wenn nicht Freitag
-                day.travelSegments.push({
-                    type: 'pause',
-                    startTime: formatTime(currentTime),
-                    endTime: formatTime(currentTime + 0.5),
-                    duration: 0.5,
-                    description: 'Pause'
-                });
-                currentTime += 0.5;
-            }
-        }
-
-        // Rückfahrten und Übernachtungen hinzufügen
-        optimizedDays.forEach((day, index) => {
-            if (day.appointments.length > 0) {
-                const lastAppointment = day.appointments[day.appointments.length - 1];
-                const endTime = parseFloat(lastAppointment.endTime.replace(':', '.'));
-                
-                if (index === 4) { // Freitag - Heimfahrt
-                    day.travelSegments.push({
-                        type: 'return',
-                        from: lastAppointment.customer,
-                        to: 'Hannover',
-                        startTime: formatTime(endTime),
-                        endTime: formatTime(endTime + 2),
-                        duration: 2,
-                        distance: '150 km',
-                        description: 'Heimweg'
-                    });
-                    day.travelTime += 2;
-                } else if (day.appointments.length > 0) { // Übernachtung
-                    const city = lastAppointment.address?.split(',')[1]?.trim() || 'Stadt';
-                    day.overnight = {
-                        city: city,
-                        description: `Hotel in ${city}`,
-                        startTime: formatTime(endTime + 0.5),
-                        type: 'overnight'
-                    };
-                }
-            }
-        });
-
-        // Ergebnis formatieren
-        const optimizedRoute = {
-            weekStart,
-            days: optimizedDays,
-            totalHours: optimizedDays.reduce((sum, day) => sum + day.workTime + day.travelTime, 0),
-            optimizations: [
-                `${optimizedDays.reduce((sum, day) => sum + day.appointments.length, 0)} Termine intelligent eingeplant`,
-                'Bestätigte Termine priorisiert',
-                'Pipeline-Alter berücksichtigt',
-                'Fahrzeiten und Pausen eingeplant',
-                'Übernachtungsstopps strategisch positioniert'
-            ],
-            stats: {
-                totalAppointments: optimizedDays.reduce((sum, day) => sum + day.appointments.length, 0),
-                confirmedAppointments: optimizedDays.reduce((sum, day) => 
-                    sum + day.appointments.filter(apt => apt.status === 'bestätigt').length, 0),
-                proposalAppointments: optimizedDays.reduce((sum, day) => 
-                    sum + day.appointments.filter(apt => apt.status === 'vorschlag').length, 0),
-                totalTravelTime: optimizedDays.reduce((sum, day) => sum + day.travelTime, 0),
-                workDays: optimizedDays.filter(day => day.appointments.length > 0).length
-            },
-            generatedAt: new Date().toISOString()
-        };
-
-        // Auto-Save der optimierten Route
-        if (autoSave && optimizedRoute.stats.totalAppointments > 0) {
-            const routeName = `Optimiert: Woche ${weekStart} (${optimizedRoute.stats.totalAppointments} Termine)`;
-            const routeDataStr = JSON.stringify(optimizedRoute);
-            
-            // Erst alle Routen für diese Woche deaktivieren
-            await new Promise((resolve, reject) => {
-                db.run(
-                    "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
-                    [weekStart],
-                    (err) => err ? reject(err) : resolve()
-                );
-            });
-
-            // Dann die neue Route als aktiv speichern
-            await new Promise((resolve, reject) => {
-                db.run(
-                    "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 1)",
-                    [routeName, weekStart, driverId || 1, routeDataStr],
-                    function(err) {
-                        if (err) reject(err);
-                        else {
-                            console.log(`💾 Route gespeichert mit ID: ${this.lastID}`);
-                            resolve();
-                        }
-                    }
-                );
-            });
-        }
-
-        console.log('✅ Routenoptimierung abgeschlossen');
-
-        // Erfolgreiche Antwort
-        res.json({
-            success: true,
-            route: optimizedRoute,
-            message: `Route für ${optimizedRoute.stats.totalAppointments} Termine erstellt`,
-            autoSaved: autoSave && optimizedRoute.stats.totalAppointments > 0,
-            stats: optimizedRoute.stats
-        });
-
-    } catch (error) {
-        console.error('❌ Routenoptimierung fehlgeschlagen:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Routenoptimierung fehlgeschlagen',
-            details: error.message
-        });
-    }
-});
-
-// ======================================================================
-// 🆕 ALTERNATIVE TERMINE VORSCHLAGEN
-// ======================================================================
-app.post('/api/routes/suggest-alternatives', validateSession, async (req, res) => {
-    const { cancelledAppointmentId, weekStart } = req.body;
-    
-    try {
-        console.log(`🔄 Suche Alternativen für abgesagten Termin ID: ${cancelledAppointmentId}`);
-        
-        // Abgesagten Termin laden
-        const cancelledAppointment = await new Promise((resolve, reject) => {
-            db.get("SELECT * FROM appointments WHERE id = ?", [cancelledAppointmentId], (err, row) => {
-                if (err) reject(err);
-                else resolve(row);
-            });
-        });
-
-        if (!cancelledAppointment) {
-            return res.status(404).json({ error: 'Termin nicht gefunden' });
-        }
-
-        // Alle verfügbaren Termine laden
-        const allAppointments = await new Promise((resolve, reject) => {
-            db.all("SELECT * FROM appointments WHERE status IN ('bestätigt', 'vorschlag')", (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
-
-        // Alternative Wochen vorschlagen (nächste 4 Wochen)
-        const alternatives = [];
-        for (let weekOffset = 1; weekOffset <= 4; weekOffset++) {
-            const altWeekStart = new Date(weekStart);
-            altWeekStart.setDate(altWeekStart.getDate() + (weekOffset * 7));
-            const altWeekStartStr = altWeekStart.toISOString().split('T')[0];
-
-            try {
-                // Planungsversuch für alternative Woche
-                const altRoute = await routePlanner.optimizeWeek(
-                    allAppointments, 
-                    altWeekStartStr, 
-                    1
-                );
-
-                // Prüfen ob der abgesagte Termin in diese Woche passt
-                const couldFit = routePlanner.canFitAppointment(altRoute, cancelledAppointment);
-                
-                if (couldFit.canFit) {
-                    alternatives.push({
-                        weekStart: altWeekStartStr,
-                        weekLabel: `KW ${Math.ceil(((altWeekStart - new Date(altWeekStart.getFullYear(), 0, 1)) / 86400000 + new Date(altWeekStart.getFullYear(), 0, 1).getDay() + 1) / 7)}`,
-                        availability: couldFit,
-                        totalAppointments: altRoute.stats.totalAppointments,
-                        workDays: altRoute.stats.workDays
-                    });
-                }
-            } catch (error) {
-                console.warn(`Planungsversuch für Woche ${altWeekStartStr} fehlgeschlagen:`, error.message);
-            }
-        }
-
-        res.json({
-            success: true,
-            cancelledAppointment: {
-                id: cancelledAppointment.id,
-                customer: cancelledAppointment.customer,
-                address: cancelledAppointment.address
-            },
-            alternatives,
-            recommendation: alternatives.length > 0 ? alternatives[0] : null,
-            message: alternatives.length > 0 
-                ? `${alternatives.length} alternative Wochen gefunden`
-                : 'Keine passenden Alternativen in den nächsten 4 Wochen'
-        });
-
-    } catch (error) {
-        console.error('❌ Alternativ-Suche fehlgeschlagen:', error);
-        res.status(500).json({
-            error: 'Alternativ-Suche fehlgeschlagen',
-            details: error.message
-        });
-    }
-});
-
-// ======================================================================
-// 🆕 PLANUNGSANALYSE
-// ======================================================================
-app.get('/api/routes/analysis/:weekStart', validateSession, async (req, res) => {
-    const { weekStart } = req.params;
-    
-    try {
-        console.log(`📊 Erstelle Planungsanalyse für Woche ${weekStart}`);
-        
-        // Termine laden
-        const appointments = await new Promise((resolve, reject) => {
-            db.all("SELECT * FROM appointments WHERE status IN ('bestätigt', 'vorschlag')", (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
-
-        // Analyse erstellen
-        const analysis = {
-            weekStart,
-            totalAppointments: appointments.length,
-            confirmed: appointments.filter(apt => apt.status === 'bestätigt').length,
-            proposals: appointments.filter(apt => apt.status === 'vorschlag').length,
-            priorityDistribution: {
-                high: appointments.filter(apt => apt.priority === 'hoch').length,
-                medium: appointments.filter(apt => apt.priority === 'mittel').length,
-                low: appointments.filter(apt => apt.priority === 'niedrig').length
-            },
-            pipelineAge: {
-                avg: appointments.reduce((sum, apt) => sum + (apt.pipeline_days || 0), 0) / appointments.length,
-                oldest: Math.max(...appointments.map(apt => apt.pipeline_days || 0)),
-                distribution: {
-                    new: appointments.filter(apt => (apt.pipeline_days || 0) < 7).length,
-                    medium: appointments.filter(apt => (apt.pipeline_days || 0) >= 7 && (apt.pipeline_days || 0) < 30).length,
-                    old: appointments.filter(apt => (apt.pipeline_days || 0) >= 30).length
-                }
-            },
-            constraints: {
-                maxWorkHours: 40,
-                appointmentDuration: 3,
-                estimatedWorkDays: Math.min(5, Math.ceil((appointments.length * 3) / 8))
-            },
-            recommendations: []
-        };
-
-        // Empfehlungen generieren
-        if (analysis.confirmed > 15) {
-            analysis.recommendations.push('⚠️ Viele bestätigte Termine - Überstunden möglich');
-        }
-        
-        if (analysis.pipelineAge.old > 0) {
-            analysis.recommendations.push(`📅 ${analysis.pipelineAge.old} alte Pipeline-Termine priorisieren`);
-        }
-        
-        if (analysis.proposals > analysis.confirmed * 2) {
-            analysis.recommendations.push('🎯 Zu viele Vorschläge - Bestätigungen einholen');
-        }
-
-        res.json({
-            success: true,
-            analysis,
-            generatedAt: new Date().toISOString()
-        });
-
-    } catch (error) {
-        console.error('❌ Planungsanalyse fehlgeschlagen:', error);
-        res.status(500).json({
-            error: 'Planungsanalyse fehlgeschlagen',
-            details: error.message
         });
     }
 });
@@ -1402,20 +1084,6 @@ app.get('/api/admin/status', (req, res) => {
     });
 });
 
-// Error handling
-app.use((err, req, res, next) => {
-    console.error('Server Error:', err.stack);
-    res.status(500).json({ error: 'Internal server error' });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-    res.status(404).json({ error: 'Endpoint not found' });
-});
-// ======================================================================
-// HILFSFUNKTION FÜR ZEITFORMATIERUNG
-// ======================================================================
-
 // ======================================================================
 // HILFSFUNKTIONEN FÜR ROUTENPLANUNG
 // ======================================================================
@@ -1621,8 +1289,18 @@ function formatTime(hours) {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
 }
 
-// Start server
+// Error handling
+app.use((err, req, res, next) => {
+    console.error('Server Error:', err.stack);
+    res.status(500).json({ error: 'Internal server error' });
+});
 
+// 404 handler
+app.use('*', (req, res) => {
+    res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// Start server
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Testimonial Tourenplaner Server running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
