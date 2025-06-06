@@ -6,6 +6,18 @@ const multer = require('multer');
 const Papa = require('papaparse');
 require('dotenv').config();
 
+// Debug: Umgebungsvariablen prüfen
+console.log('🔍 Environment Variables Debug:');
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('GOOGLE_MAPS_API_KEY exists:', !!process.env.GOOGLE_MAPS_API_KEY);
+console.log('GOOGLE_MAPS_API_KEY length:', process.env.GOOGLE_MAPS_API_KEY ? process.env.GOOGLE_MAPS_API_KEY.length : 0);
+
+// Fallback API Key direkt setzen (temporär für Testing)
+if (!process.env.GOOGLE_MAPS_API_KEY) {
+    console.log('⚠️ Setting fallback API key');
+    process.env.GOOGLE_MAPS_API_KEY = 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
+}
+
 // ======================================================================
 // INTELLIGENTE ROUTENPLANUNG INTEGRATION
 // ======================================================================
@@ -217,6 +229,9 @@ function validateSession(req, res, next) {
 
 // Health check
 app.get('/api/health', (req, res) => {
+    const hasApiKey = !!process.env.GOOGLE_MAPS_API_KEY;
+    const apiKeyLength = process.env.GOOGLE_MAPS_API_KEY ? process.env.GOOGLE_MAPS_API_KEY.length : 0;
+    
     res.json({
         status: 'OK',
         message: 'Testimonial Tourenplaner Backend with Intelligent Route Planning!',
@@ -230,7 +245,12 @@ app.get('/api/health', (req, res) => {
             'csv_import',
             'testimonial_focused'
         ],
-        google_maps: process.env.GOOGLE_MAPS_API_KEY ? '✅ Configured' : '⚠️ Fallback Mode'
+        google_maps: hasApiKey ? '✅ Configured' : '⚠️ Fallback Mode',
+        debug: {
+            api_key_exists: hasApiKey,
+            api_key_length: apiKeyLength,
+            api_key_first_chars: process.env.GOOGLE_MAPS_API_KEY ? process.env.GOOGLE_MAPS_API_KEY.substring(0, 10) + '...' : 'none'
+        }
     });
 });
 
