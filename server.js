@@ -2,12 +2,14 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const path = require('path');
+const multer = require('multer');
+const Papa = require('papaparse');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
 // Middleware
-app.use(cors({
+app.use(cors({('/api/auth/login
     origin: ['https://expertise-zeigen.de', 'https://www.expertise-zeigen.de', '*'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'multipart/form-data'],
@@ -422,9 +424,6 @@ app.get('/api/admin/status', (req, res) => {
         });
     });
 });
-const multer = require('multer');
-const Papa = require('papaparse');
-
 // Configure multer for file uploads
 const upload = multer({ 
     storage: multer.memoryStorage(),
