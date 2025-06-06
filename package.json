@@ -4,8 +4,8 @@
   "description": "Tourenplaner Backend für Railway",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+  "start": "node server.js",
+  "build": "echo 'No build step required'"
   },
   "dependencies": {
     "express": "^4.18.2",
