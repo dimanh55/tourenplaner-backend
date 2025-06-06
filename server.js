@@ -161,6 +161,21 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Authentication
+app.post('/api/auth/login', function(req, res) {
+    const password = req.body.password;
+    
+    if (password === 'testimonials2025') {
+        res.json({
+            token: 'railway-token-' + Date.now(),
+            user: { name: 'Admin', role: 'admin' },
+            message: 'Login successful'
+        });
+    } else {
+        res.status(401).json({ error: 'Invalid password' });
+    }
+});
+
 // Root route
 app.get('/', (req, res) => {
     res.json({
@@ -178,20 +193,6 @@ app.get('/', (req, res) => {
     });
 });
 
-// Authentication
-app.post('/api/auth/login', function(req, res) {
-    const password = req.body.password;
-    
-    if (password === 'testimonials2025') {
-        res.json({
-            token: 'railway-token-' + Date.now(),
-            user: { name: 'Admin', role: 'admin' },
-            message: 'Login successful'
-        });
-    } else {
-        res.status(401).json({ error: 'Invalid password' });
-    }
-});
 // Get appointments
 app.get('/api/appointments', (req, res) => {
     db.all("SELECT * FROM appointments ORDER BY created_at DESC", (err, rows) => {
