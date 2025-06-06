@@ -4,6 +4,13 @@ const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
 const Papa = require('papaparse');
+require('dotenv').config();
+
+// ======================================================================
+// INTELLIGENTE ROUTENPLANUNG INTEGRATION
+// ======================================================================
+const IntelligentRoutePlanner = require('./intelligent-route-planner');
+const routePlanner = new IntelligentRoutePlanner();
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -99,7 +106,7 @@ function initializeDatabase() {
         }
     });
 
-    console.log('✅ Database tables initialized (including saved_routes and user_sessions)');
+    console.log('✅ Database tables initialized');
 }
 
 function insertSampleData() {
@@ -212,10 +219,18 @@ function validateSession(req, res, next) {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'OK',
-        message: 'Testimonial Tourenplaner Backend running on Railway!',
+        message: 'Testimonial Tourenplaner Backend with Intelligent Route Planning!',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
-        features: ['persistent_sessions', 'route_saving', 'csv_import', 'testimonial_focused']
+        features: [
+            'intelligent_route_planning',
+            'google_maps_integration', 
+            'persistent_sessions',
+            'route_saving',
+            'csv_import',
+            'testimonial_focused'
+        ],
+        google_maps: process.env.GOOGLE_MAPS_API_KEY ? '✅ Configured' : '⚠️ Fallback Mode'
     });
 });
 
@@ -281,7 +296,8 @@ app.post('/api/auth/logout', validateSession, (req, res) => {
 // Root route
 app.get('/', (req, res) => {
     res.json({
-        message: '🎬 Testimonial Tourenplaner API is running!',
+        message: '🎬 Testimonial Tourenplaner API with Intelligent Route Planning!',
+        version: '2.0 - Intelligence Edition',
         endpoints: [
             'GET /api/health',
             'POST /api/auth/login',
@@ -289,7 +305,9 @@ app.get('/', (req, res) => {
             'POST /api/auth/logout',
             'GET /api/appointments',
             'GET /api/drivers',
-            'POST /api/routes/optimize',
+            'POST /api/routes/optimize (🧠 INTELLIGENT)',
+            'POST /api/routes/suggest-alternatives (🆕)',
+            'GET /api/routes/analysis/:weekStart (🆕)',
             'GET /api/routes/saved',
             'POST /api/routes/save',
             'DELETE /api/routes/:id',
@@ -297,7 +315,19 @@ app.get('/', (req, res) => {
             'POST /api/admin/seed',
             'POST /api/admin/preview-csv',
             'POST /api/admin/import-csv'
-        ]
+        ],
+        intelligence: {
+            google_maps_api: process.env.GOOGLE_MAPS_API_KEY ? 'Enabled' : 'Fallback Mode',
+            features: [
+                'Multi-Constraint Optimization',
+                'Geographic Distance Minimization', 
+                'Work Hour Constraints (40h/week)',
+                'Confirmed Appointments Priority',
+                'Pipeline Age Consideration',
+                'Strategic Overnight Stops',
+                'VIP Customer Preference'
+            ]
+        }
     });
 });
 
@@ -366,126 +396,281 @@ app.get('/api/drivers', (req, res) => {
     });
 });
 
-// Route optimization
-app.post('/api/routes/optimize', (req, res) => {
+// ======================================================================
+// 🧠 INTELLIGENTE ROUTENOPTIMIERUNG - HAUPTENDPOINT
+// ======================================================================
+app.post('/api/routes/optimize', validateSession, async (req, res) => {
     const { weekStart, driverId, autoSave = true } = req.body;
     
     if (!weekStart) {
         return res.status(400).json({ error: 'weekStart is required' });
     }
 
-    console.log('🔄 Route optimization started...');
+    console.log('🧠 Intelligente Routenoptimierung gestartet...');
     
-    db.all("SELECT * FROM appointments WHERE status IN ('bestätigt', 'vorschlag') ORDER BY priority DESC, pipeline_days DESC", (err, appointments) => {
-        if (err) {
-            res.status(500).json({ error: err.message });
-            return;
+    try {
+        // Termine aus der Datenbank laden
+        const appointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT * FROM appointments 
+                WHERE status IN ('bestätigt', 'vorschlag') 
+                ORDER BY 
+                    CASE WHEN status = 'bestätigt' THEN 0 ELSE 1 END,
+                    pipeline_days DESC,
+                    priority DESC
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        if (appointments.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine Termine zum Planen gefunden',
+                route: null
+            });
         }
-        
-        // Parse appointment data for optimization
-        const enhancedAppointments = appointments.map(apt => {
-            let parsedNotes = {};
-            try {
-                parsedNotes = JSON.parse(apt.notes || '{}');
-            } catch (e) {
-                parsedNotes = {
-                    invitee_name: apt.customer,
-                    company: '',
-                    customer_company: ''
-                };
-            }
-            
-            return {
-                ...apt,
-                invitee_name: parsedNotes.invitee_name || apt.customer,
-                company: parsedNotes.company || '',
-                customer_company: parsedNotes.customer_company || ''
-            };
-        });
-        
-        // Simple route optimization
-        const weekDays = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
-        const startDate = new Date(weekStart);
-        
-        const optimizedDays = weekDays.map((day, index) => {
-            const date = new Date(startDate);
-            date.setDate(startDate.getDate() + index);
-            
-            // Distribute appointments across days (max 2 per day)
-            const dayAppointments = enhancedAppointments.slice(index * 2, (index + 1) * 2);
-            
-            const mappedAppointments = dayAppointments.map((apt, i) => ({
-                ...apt,
-                startTime: `${9 + (i * 4)}:00`,
-                endTime: `${9 + (i * 4) + apt.duration}:00`,
-                travelTime: 1.5
-            }));
-            
-            return {
-                day,
-                date: date.toISOString().split('T')[0],
-                appointments: mappedAppointments,
-                workTime: mappedAppointments.reduce((sum, apt) => sum + apt.duration, 0),
-                travelTime: mappedAppointments.length * 1.5,
-                overnight: mappedAppointments.length > 0 ? 
-                    `Hotel in ${mappedAppointments[0]?.address?.split(',')[0] || 'Stadt'}` : null
-            };
-        });
 
-        const optimizedRoute = {
-            weekStart,
-            totalHours: optimizedDays.reduce((sum, day) => sum + day.workTime + day.travelTime, 0),
-            days: optimizedDays,
-            optimizations: [
-                `${enhancedAppointments.length} Testimonial-Termine erfolgreich eingeplant`,
-                'Arbeitszeiten optimiert (max. 40h/Woche)',
-                'Fahrzeiten minimiert durch intelligente Reihenfolge',
-                'Person-fokussierte Darstellung für bessere Übersicht'
-            ],
-            generatedAt: new Date().toISOString()
-        };
+        console.log(`📊 ${appointments.length} Termine gefunden für intelligente Optimierung`);
 
-        // Auto-save the optimized route if requested
-        if (autoSave && enhancedAppointments.length > 0) {
-            const routeName = `Automatisch: Testimonials Woche ${weekStart}`;
+        // Intelligente Routenplanung ausführen
+        const optimizedRoute = await routePlanner.optimizeWeek(appointments, weekStart, driverId);
+
+        // Auto-Save der optimierten Route
+        if (autoSave && optimizedRoute.stats.totalAppointments > 0) {
+            const routeName = `Intelligent: Woche ${weekStart} (${optimizedRoute.stats.totalAppointments} Termine)`;
             const routeDataStr = JSON.stringify(optimizedRoute);
             
-            // First, deactivate all routes for this week
-            db.run(
-                "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
-                [weekStart],
-                () => {
-                    // Then save the new route as active
-                    db.run(
-                        "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 1)",
-                        [routeName, weekStart, driverId || 1, routeDataStr],
-                        function(err) {
-                            if (err) {
-                                console.error('Auto-save route error:', err);
-                            } else {
-                                console.log(`✅ Route auto-saved with ID: ${this.lastID}`);
-                            }
+            // Erst alle Routen für diese Woche deaktivieren
+            await new Promise((resolve, reject) => {
+                db.run(
+                    "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
+                    [weekStart],
+                    (err) => err ? reject(err) : resolve()
+                );
+            });
+
+            // Dann die neue Route als aktiv speichern
+            await new Promise((resolve, reject) => {
+                db.run(
+                    "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 1)",
+                    [routeName, weekStart, driverId || 1, routeDataStr],
+                    function(err) {
+                        if (err) reject(err);
+                        else {
+                            console.log(`💾 Intelligente Route gespeichert mit ID: ${this.lastID}`);
+                            resolve();
                         }
-                    );
-                }
-            );
+                    }
+                );
+            });
         }
 
-        console.log('✅ Route optimization completed');
+        console.log('✅ Intelligente Routenoptimierung abgeschlossen');
 
+        // Erfolgreiche Antwort
         res.json({
             success: true,
             route: optimizedRoute,
-            message: `Route für ${enhancedAppointments.length} Testimonial-Termine optimiert`,
-            autoSaved: autoSave && enhancedAppointments.length > 0,
-            stats: {
-                totalAppointments: enhancedAppointments.length,
-                scheduledAppointments: optimizedRoute.days.reduce((sum, day) => sum + day.appointments.length, 0),
-                totalHours: optimizedRoute.totalHours,
-                workDays: optimizedRoute.days.filter(day => day.appointments.length > 0).length
-            }
+            message: `Intelligente Route für ${optimizedRoute.stats.totalAppointments} Termine erstellt`,
+            autoSaved: autoSave && optimizedRoute.stats.totalAppointments > 0,
+            intelligence: {
+                algorithm: 'Multi-Constraint Optimization with Google Maps',
+                factors: [
+                    'Geografische Distanz-Minimierung (Google Maps)',
+                    'Arbeitszeit-Constraints (40h/Woche)',
+                    'Bestätigte Termine priorisiert',
+                    'Pipeline-Alter berücksichtigt',
+                    'Strategische Übernachtungsstopps',
+                    'VIP-Kunden bevorzugt',
+                    'Realistische Fahrzeiten'
+                ],
+                performance: {
+                    totalAppointments: appointments.length,
+                    scheduledAppointments: optimizedRoute.stats.totalAppointments,
+                    efficiency: Math.round((optimizedRoute.stats.totalAppointments / appointments.length) * 100),
+                    workDays: optimizedRoute.stats.workDays,
+                    avgAppointmentsPerDay: (optimizedRoute.stats.totalAppointments / optimizedRoute.stats.workDays).toFixed(1),
+                    travelEfficiency: `${(optimizedRoute.stats.efficiency.travelEfficiency * 100).toFixed(1)}%`
+                }
+            },
+            constraints: {
+                maxHoursPerWeek: 40,
+                maxHoursPerDay: 8,
+                flexHoursPerDay: 10,
+                appointmentDuration: 3,
+                homeBase: 'Hannover'
+            },
+            stats: optimizedRoute.stats
         });
-    });
+
+    } catch (error) {
+        console.error('❌ Intelligente Routenoptimierung fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Intelligente Routenoptimierung fehlgeschlagen',
+            details: error.message,
+            fallback: 'Google Maps API möglicherweise nicht verfügbar'
+        });
+    }
+});
+
+// ======================================================================
+// 🆕 ALTERNATIVE TERMINE VORSCHLAGEN
+// ======================================================================
+app.post('/api/routes/suggest-alternatives', validateSession, async (req, res) => {
+    const { cancelledAppointmentId, weekStart } = req.body;
+    
+    try {
+        console.log(`🔄 Suche Alternativen für abgesagten Termin ID: ${cancelledAppointmentId}`);
+        
+        // Abgesagten Termin laden
+        const cancelledAppointment = await new Promise((resolve, reject) => {
+            db.get("SELECT * FROM appointments WHERE id = ?", [cancelledAppointmentId], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+
+        if (!cancelledAppointment) {
+            return res.status(404).json({ error: 'Termin nicht gefunden' });
+        }
+
+        // Alle verfügbaren Termine laden
+        const allAppointments = await new Promise((resolve, reject) => {
+            db.all("SELECT * FROM appointments WHERE status IN ('bestätigt', 'vorschlag')", (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        // Alternative Wochen vorschlagen (nächste 4 Wochen)
+        const alternatives = [];
+        for (let weekOffset = 1; weekOffset <= 4; weekOffset++) {
+            const altWeekStart = new Date(weekStart);
+            altWeekStart.setDate(altWeekStart.getDate() + (weekOffset * 7));
+            const altWeekStartStr = altWeekStart.toISOString().split('T')[0];
+
+            try {
+                // Planungsversuch für alternative Woche
+                const altRoute = await routePlanner.optimizeWeek(
+                    allAppointments, 
+                    altWeekStartStr, 
+                    1
+                );
+
+                // Prüfen ob der abgesagte Termin in diese Woche passt
+                const couldFit = routePlanner.canFitAppointment(altRoute, cancelledAppointment);
+                
+                if (couldFit.canFit) {
+                    alternatives.push({
+                        weekStart: altWeekStartStr,
+                        weekLabel: `KW ${Math.ceil(((altWeekStart - new Date(altWeekStart.getFullYear(), 0, 1)) / 86400000 + new Date(altWeekStart.getFullYear(), 0, 1).getDay() + 1) / 7)}`,
+                        availability: couldFit,
+                        totalAppointments: altRoute.stats.totalAppointments,
+                        workDays: altRoute.stats.workDays
+                    });
+                }
+            } catch (error) {
+                console.warn(`Planungsversuch für Woche ${altWeekStartStr} fehlgeschlagen:`, error.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            cancelledAppointment: {
+                id: cancelledAppointment.id,
+                customer: cancelledAppointment.customer,
+                address: cancelledAppointment.address
+            },
+            alternatives,
+            recommendation: alternatives.length > 0 ? alternatives[0] : null,
+            message: alternatives.length > 0 
+                ? `${alternatives.length} alternative Wochen gefunden`
+                : 'Keine passenden Alternativen in den nächsten 4 Wochen'
+        });
+
+    } catch (error) {
+        console.error('❌ Alternativ-Suche fehlgeschlagen:', error);
+        res.status(500).json({
+            error: 'Alternativ-Suche fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// ======================================================================
+// 🆕 PLANUNGSANALYSE
+// ======================================================================
+app.get('/api/routes/analysis/:weekStart', validateSession, async (req, res) => {
+    const { weekStart } = req.params;
+    
+    try {
+        console.log(`📊 Erstelle Planungsanalyse für Woche ${weekStart}`);
+        
+        // Termine laden
+        const appointments = await new Promise((resolve, reject) => {
+            db.all("SELECT * FROM appointments WHERE status IN ('bestätigt', 'vorschlag')", (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        // Analyse erstellen
+        const analysis = {
+            weekStart,
+            totalAppointments: appointments.length,
+            confirmed: appointments.filter(apt => apt.status === 'bestätigt').length,
+            proposals: appointments.filter(apt => apt.status === 'vorschlag').length,
+            priorityDistribution: {
+                high: appointments.filter(apt => apt.priority === 'hoch').length,
+                medium: appointments.filter(apt => apt.priority === 'mittel').length,
+                low: appointments.filter(apt => apt.priority === 'niedrig').length
+            },
+            pipelineAge: {
+                avg: appointments.reduce((sum, apt) => sum + (apt.pipeline_days || 0), 0) / appointments.length,
+                oldest: Math.max(...appointments.map(apt => apt.pipeline_days || 0)),
+                distribution: {
+                    new: appointments.filter(apt => (apt.pipeline_days || 0) < 7).length,
+                    medium: appointments.filter(apt => (apt.pipeline_days || 0) >= 7 && (apt.pipeline_days || 0) < 30).length,
+                    old: appointments.filter(apt => (apt.pipeline_days || 0) >= 30).length
+                }
+            },
+            constraints: {
+                maxWorkHours: 40,
+                appointmentDuration: 3,
+                estimatedWorkDays: Math.min(5, Math.ceil((appointments.length * 3) / 8))
+            },
+            recommendations: []
+        };
+
+        // Empfehlungen generieren
+        if (analysis.confirmed > 15) {
+            analysis.recommendations.push('⚠️ Viele bestätigte Termine - Überstunden möglich');
+        }
+        
+        if (analysis.pipelineAge.old > 0) {
+            analysis.recommendations.push(`📅 ${analysis.pipelineAge.old} alte Pipeline-Termine priorisieren`);
+        }
+        
+        if (analysis.proposals > analysis.confirmed * 2) {
+            analysis.recommendations.push('🎯 Zu viele Vorschläge - Bestätigungen einholen');
+        }
+
+        res.json({
+            success: true,
+            analysis,
+            generatedAt: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ Planungsanalyse fehlgeschlagen:', error);
+        res.status(500).json({
+            error: 'Planungsanalyse fehlgeschlagen',
+            details: error.message
+        });
+    }
 });
 
 // Get saved routes
@@ -1014,7 +1199,8 @@ app.get('/api/admin/status', (req, res) => {
                     drivers_count: row2.driver_count,
                     saved_routes_count: row3.routes_count,
                     database_path: dbPath,
-                    type: 'testimonial_focused'
+                    type: 'testimonial_focused_with_intelligence',
+                    google_maps_api: process.env.GOOGLE_MAPS_API_KEY ? 'configured' : 'fallback'
                 });
             });
         });
@@ -1037,7 +1223,9 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Testimonial Tourenplaner Server running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-    console.log(`✨ Features: Session persistence, Route saving, Testimonial-focused CSV import`);
+    console.log(`🧠 Intelligent Route Planning: ENABLED`);
+    console.log(`🗺️ Google Maps API: ${process.env.GOOGLE_MAPS_API_KEY ? '✅ Configured' : '⚠️ Fallback Mode'}`);
+    console.log(`✨ Features: Intelligent Planning, Google Maps, Session Persistence, Route Saving`);
 });
 
 // Graceful shutdown
