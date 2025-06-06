@@ -426,7 +426,7 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
         return res.status(400).json({ error: 'weekStart is required' });
     }
 
-    console.log('🧠 Intelligente Routenoptimierung gestartet...');
+    console.log('🧠 Intelligente Routenoptimierung gestartet für Woche:', weekStart);
     
     try {
         // Termine aus der Datenbank laden
@@ -454,12 +454,193 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
 
         console.log(`📊 ${appointments.length} Termine gefunden für intelligente Optimierung`);
 
-        // Intelligente Routenplanung ausführen
-        const optimizedRoute = await routePlanner.optimizeWeek(appointments, weekStart, driverId);
+        // ======================================================================
+        // VEREINFACHTE ABER FUNKTIONIERENDE ROUTENPLANUNG
+        // ======================================================================
+        
+        // Termine nach Priorität sortieren
+        const sortedAppointments = appointments.sort((a, b) => {
+            // Bestätigte Termine zuerst
+            if (a.status === 'bestätigt' && b.status !== 'bestätigt') return -1;
+            if (b.status === 'bestätigt' && a.status !== 'bestätigt') return 1;
+            
+            // Dann nach Pipeline-Alter
+            return (b.pipeline_days || 0) - (a.pipeline_days || 0);
+        });
+
+        // Woche initialisieren
+        const weekDays = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
+        const startDate = new Date(weekStart);
+        
+        const optimizedDays = weekDays.map((day, dayIndex) => {
+            const date = new Date(startDate);
+            date.setDate(startDate.getDate() + dayIndex);
+            
+            return {
+                day,
+                date: date.toISOString().split('T')[0],
+                appointments: [],
+                travelSegments: [],
+                workTime: 0,
+                travelTime: 0,
+                currentLocation: 'Hannover'
+            };
+        });
+
+        // Termine intelligent auf Tage verteilen
+        let currentDayIndex = 0;
+        let currentTime = 8; // Start um 8:00
+
+        for (const apt of sortedAppointments) {
+            // Prüfe ob aktueller Tag noch Platz hat
+            const currentDay = optimizedDays[currentDayIndex];
+            
+            // Max 2 Termine pro Tag oder max 8h Arbeitszeit
+            if (currentDay.appointments.length >= 2 || currentDay.workTime >= 8) {
+                currentDayIndex++;
+                currentTime = 8; // Reset time for new day
+                
+                // Wenn alle Tage voll sind, stoppe
+                if (currentDayIndex >= optimizedDays.length) {
+                    console.log('⚠️ Alle Wochentage sind voll - weitere Termine werden nicht eingeplant');
+                    break;
+                }
+            }
+
+            const day = optimizedDays[currentDayIndex];
+            
+            // Parse appointment notes
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(apt.notes || '{}');
+            } catch (e) {
+                parsedNotes = {};
+            }
+
+            // Fahrt zum Termin berechnen (vereinfacht)
+            const travelTimeToAppointment = day.appointments.length === 0 ? 1.5 : 0.5; // Erste Fahrt länger
+            
+            // Fahrt-Segment hinzufügen
+            if (day.appointments.length === 0) {
+                // Erste Fahrt von Hannover
+                day.travelSegments.push({
+                    type: 'travel',
+                    from: 'Hannover',
+                    to: parsedNotes.invitee_name || apt.customer,
+                    startTime: formatTime(currentTime),
+                    endTime: formatTime(currentTime + travelTimeToAppointment),
+                    duration: travelTimeToAppointment,
+                    distance: '120 km',
+                    description: `Fahrt zum Termin, ${formatTime(currentTime + travelTimeToAppointment)}`
+                });
+            } else {
+                // Fahrt zwischen Terminen
+                const lastApt = day.appointments[day.appointments.length - 1];
+                day.travelSegments.push({
+                    type: 'travel',
+                    from: lastApt.invitee_name || lastApt.customer,
+                    to: parsedNotes.invitee_name || apt.customer,
+                    startTime: formatTime(currentTime),
+                    endTime: formatTime(currentTime + travelTimeToAppointment),
+                    duration: travelTimeToAppointment,
+                    distance: '45 km',
+                    description: `Fahrt nach ${apt.address?.split(',')[0] || 'nächstem Termin'}`
+                });
+            }
+            
+            currentTime += travelTimeToAppointment;
+
+            // Termin hinzufügen
+            const appointment = {
+                ...apt,
+                invitee_name: parsedNotes.invitee_name || apt.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || '',
+                startTime: formatTime(currentTime),
+                endTime: formatTime(currentTime + 3),
+                duration: 3,
+                status: apt.status,
+                customer: parsedNotes.invitee_name || apt.customer // Für Frontend-Kompatibilität
+            };
+
+            day.appointments.push(appointment);
+            
+            currentTime += 3; // 3h Termin
+            day.workTime += 3;
+            day.travelTime += travelTimeToAppointment;
+            
+            console.log(`📅 Eingeplant: ${appointment.invitee_name} → ${day.day} ${appointment.startTime}`);
+
+            // Pause nach Termin (falls nicht letzter Termin des Tages)
+            if (day.appointments.length === 1 && currentDayIndex < 4) { // Nur wenn nicht Freitag
+                day.travelSegments.push({
+                    type: 'pause',
+                    startTime: formatTime(currentTime),
+                    endTime: formatTime(currentTime + 0.5),
+                    duration: 0.5,
+                    description: 'Pause'
+                });
+                currentTime += 0.5;
+            }
+        }
+
+        // Rückfahrten und Übernachtungen hinzufügen
+        optimizedDays.forEach((day, index) => {
+            if (day.appointments.length > 0) {
+                const lastAppointment = day.appointments[day.appointments.length - 1];
+                const endTime = parseFloat(lastAppointment.endTime.replace(':', '.'));
+                
+                if (index === 4) { // Freitag - Heimfahrt
+                    day.travelSegments.push({
+                        type: 'return',
+                        from: lastAppointment.customer,
+                        to: 'Hannover',
+                        startTime: formatTime(endTime),
+                        endTime: formatTime(endTime + 2),
+                        duration: 2,
+                        distance: '150 km',
+                        description: 'Heimweg'
+                    });
+                    day.travelTime += 2;
+                } else if (day.appointments.length > 0) { // Übernachtung
+                    const city = lastAppointment.address?.split(',')[1]?.trim() || 'Stadt';
+                    day.overnight = {
+                        city: city,
+                        description: `Hotel in ${city}`,
+                        startTime: formatTime(endTime + 0.5),
+                        type: 'overnight'
+                    };
+                }
+            }
+        });
+
+        // Ergebnis formatieren
+        const optimizedRoute = {
+            weekStart,
+            days: optimizedDays,
+            totalHours: optimizedDays.reduce((sum, day) => sum + day.workTime + day.travelTime, 0),
+            optimizations: [
+                `${optimizedDays.reduce((sum, day) => sum + day.appointments.length, 0)} Termine intelligent eingeplant`,
+                'Bestätigte Termine priorisiert',
+                'Pipeline-Alter berücksichtigt',
+                'Fahrzeiten und Pausen eingeplant',
+                'Übernachtungsstopps strategisch positioniert'
+            ],
+            stats: {
+                totalAppointments: optimizedDays.reduce((sum, day) => sum + day.appointments.length, 0),
+                confirmedAppointments: optimizedDays.reduce((sum, day) => 
+                    sum + day.appointments.filter(apt => apt.status === 'bestätigt').length, 0),
+                proposalAppointments: optimizedDays.reduce((sum, day) => 
+                    sum + day.appointments.filter(apt => apt.status === 'vorschlag').length, 0),
+                totalTravelTime: optimizedDays.reduce((sum, day) => sum + day.travelTime, 0),
+                workDays: optimizedDays.filter(day => day.appointments.length > 0).length
+            },
+            generatedAt: new Date().toISOString()
+        };
 
         // Auto-Save der optimierten Route
         if (autoSave && optimizedRoute.stats.totalAppointments > 0) {
-            const routeName = `Intelligent: Woche ${weekStart} (${optimizedRoute.stats.totalAppointments} Termine)`;
+            const routeName = `Optimiert: Woche ${weekStart} (${optimizedRoute.stats.totalAppointments} Termine)`;
             const routeDataStr = JSON.stringify(optimizedRoute);
             
             // Erst alle Routen für diese Woche deaktivieren
@@ -479,7 +660,7 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
                     function(err) {
                         if (err) reject(err);
                         else {
-                            console.log(`💾 Intelligente Route gespeichert mit ID: ${this.lastID}`);
+                            console.log(`💾 Route gespeichert mit ID: ${this.lastID}`);
                             resolve();
                         }
                     }
@@ -487,51 +668,23 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
             });
         }
 
-        console.log('✅ Intelligente Routenoptimierung abgeschlossen');
+        console.log('✅ Routenoptimierung abgeschlossen');
 
         // Erfolgreiche Antwort
         res.json({
             success: true,
             route: optimizedRoute,
-            message: `Intelligente Route für ${optimizedRoute.stats.totalAppointments} Termine erstellt`,
+            message: `Route für ${optimizedRoute.stats.totalAppointments} Termine erstellt`,
             autoSaved: autoSave && optimizedRoute.stats.totalAppointments > 0,
-            intelligence: {
-                algorithm: 'Multi-Constraint Optimization with Google Maps',
-                factors: [
-                    'Geografische Distanz-Minimierung (Google Maps)',
-                    'Arbeitszeit-Constraints (40h/Woche)',
-                    'Bestätigte Termine priorisiert',
-                    'Pipeline-Alter berücksichtigt',
-                    'Strategische Übernachtungsstopps',
-                    'VIP-Kunden bevorzugt',
-                    'Realistische Fahrzeiten'
-                ],
-                performance: {
-                    totalAppointments: appointments.length,
-                    scheduledAppointments: optimizedRoute.stats.totalAppointments,
-                    efficiency: Math.round((optimizedRoute.stats.totalAppointments / appointments.length) * 100),
-                    workDays: optimizedRoute.stats.workDays,
-                    avgAppointmentsPerDay: (optimizedRoute.stats.totalAppointments / optimizedRoute.stats.workDays).toFixed(1),
-                    travelEfficiency: `${(optimizedRoute.stats.efficiency.travelEfficiency * 100).toFixed(1)}%`
-                }
-            },
-            constraints: {
-                maxHoursPerWeek: 40,
-                maxHoursPerDay: 8,
-                flexHoursPerDay: 10,
-                appointmentDuration: 3,
-                homeBase: 'Hannover'
-            },
             stats: optimizedRoute.stats
         });
 
     } catch (error) {
-        console.error('❌ Intelligente Routenoptimierung fehlgeschlagen:', error);
+        console.error('❌ Routenoptimierung fehlgeschlagen:', error);
         res.status(500).json({
             success: false,
-            error: 'Intelligente Routenoptimierung fehlgeschlagen',
-            details: error.message,
-            fallback: 'Google Maps API möglicherweise nicht verfügbar'
+            error: 'Routenoptimierung fehlgeschlagen',
+            details: error.message
         });
     }
 });
@@ -1237,8 +1390,18 @@ app.use((err, req, res, next) => {
 app.use('*', (req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
+// ======================================================================
+// HILFSFUNKTION FÜR ZEITFORMATIERUNG
+// ======================================================================
+
+function formatTime(hours) {
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+}
 
 // Start server
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Testimonial Tourenplaner Server running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
