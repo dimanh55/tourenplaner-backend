@@ -179,8 +179,8 @@ app.get('/', (req, res) => {
 });
 
 // Authentication
-app.post('/api/auth/login', (req, res) => {
-    const { password } = req.body;
+app.post('/api/auth/login', function(req, res) {
+    const password = req.body.password;
     
     if (password === 'testimonials2025') {
         res.json({
@@ -188,6 +188,10 @@ app.post('/api/auth/login', (req, res) => {
             user: { name: 'Admin', role: 'admin' },
             message: 'Login successful'
         });
+    } else {
+        res.status(401).json({ error: 'Invalid password' });
+    }
+});
     } else {
         res.status(401).json({ error: 'Invalid password' });
     }
