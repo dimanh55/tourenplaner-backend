@@ -288,7 +288,7 @@ app.post('/api/routes/optimize', (req, res) => {
 });
 
 // Admin endpoint to seed database manually
-app.post('/api/admin/seed', (req, res) => {
+app.all('/api/admin/seed', (req, res) => {
     console.log('🌱 Admin seed endpoint called');
     
     const sampleAppointments = [
