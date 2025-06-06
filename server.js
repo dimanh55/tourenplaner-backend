@@ -422,7 +422,187 @@ app.get('/api/admin/status', (req, res) => {
         });
     });
 });
+const multer = require('multer');
+const Papa = require('papaparse');
 
+// Configure multer for file uploads
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
+
+// CSV Preview endpoint
+app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: ',',
+            encoding: 'utf-8'
+        });
+
+        // Analyze the data
+        const analysis = {
+            totalRows: parsed.data.length,
+            columns: parsed.meta.fields,
+            confirmedAppointments: 0,
+            proposalAppointments: 0,
+            onHoldAppointments: 0,
+            missingData: 0,
+            sampleRows: parsed.data.slice(0, 5)
+        };
+
+        parsed.data.forEach(row => {
+            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                analysis.onHoldAppointments++;
+            } else if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
+                analysis.confirmedAppointments++;
+            } else if (row['Customer Company'] || row['Invitee Name']) {
+                analysis.proposalAppointments++;
+            } else {
+                analysis.missingData++;
+            }
+        });
+
+        res.json({
+            success: true,
+            analysis: analysis,
+            message: 'CSV Vorschau erstellt'
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            error: 'CSV Analyse fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// CSV Import endpoint
+app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    console.log('📁 CSV Import gestartet...');
+    
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: ',',
+            encoding: 'utf-8'
+        });
+
+        console.log(`📊 ${parsed.data.length} Zeilen gefunden`);
+
+        const processedAppointments = [];
+        let skippedCount = 0;
+        let confirmedCount = 0;
+        let proposalCount = 0;
+
+        parsed.data.forEach((row, index) => {
+            // Skip if "On Hold" is filled
+            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                skippedCount++;
+                return;
+            }
+
+            // Skip if essential data missing
+            if (!row['Customer Company'] && !row['Invitee Name']) {
+                skippedCount++;
+                return;
+            }
+
+            // Build address
+            let fullAddress = row['Adresse'] || '';
+            if (!fullAddress && row['Straße & Hausnr.']) {
+                const parts = [];
+                if (row['Straße & Hausnr.']) parts.push(row['Straße & Hausnr.']);
+                if (row['PLZ'] && row['Ort']) parts.push(`${row['PLZ']} ${row['Ort']}`);
+                if (row['Land']) parts.push(row['Land']);
+                fullAddress = parts.join(', ');
+            }
+
+            // Determine status
+            const hasStartDate = row['Start Date & Time'] && row['Start Date & Time'].toString().trim() !== '';
+            const status = hasStartDate ? 'bestätigt' : 'vorschlag';
+            
+            if (status === 'bestätigt') confirmedCount++;
+            else proposalCount++;
+
+            // Priority logic
+            let priority = 'mittel';
+            const company = (row['Customer Company'] || '').toLowerCase();
+            if (company.includes('bmw') || company.includes('mercedes') || company.includes('audi')) {
+                priority = 'hoch';
+            }
+
+            const appointment = {
+                customer: row['Customer Company'] || row['Invitee Name'],
+                address: fullAddress || 'Adresse nicht verfügbar',
+                priority: priority,
+                status: status,
+                duration: priority === 'hoch' ? 4 : 3,
+                pipeline_days: status === 'vorschlag' ? Math.floor(Math.random() * 30) + 1 : 7,
+                notes: `CSV Import - ${row['Notiz'] || 'Keine Notizen'}`
+            };
+
+            processedAppointments.push(appointment);
+        });
+
+        // Clear and insert
+        db.run("DELETE FROM appointments", (err) => {
+            if (err) {
+                return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
+            }
+
+            const stmt = db.prepare(`INSERT INTO appointments 
+                (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+            let insertedCount = 0;
+
+            processedAppointments.forEach((apt) => {
+                stmt.run([
+                    apt.customer, apt.address, apt.priority, apt.status, 
+                    apt.duration, apt.pipeline_days, apt.notes,
+                    JSON.stringify([]), JSON.stringify([])
+                ], (err) => {
+                    if (!err) insertedCount++;
+                    
+                    if (insertedCount === processedAppointments.length) {
+                        stmt.finalize();
+                        res.json({
+                            success: true,
+                            message: 'CSV Import abgeschlossen',
+                            stats: {
+                                totalRows: parsed.data.length,
+                                inserted: insertedCount,
+                                confirmed: confirmedCount,
+                                proposals: proposalCount,
+                                skipped: skippedCount
+                            }
+                        });
+                    }
+                });
+            });
+        });
+
+    } catch (error) {
+        console.error('❌ CSV Import Fehler:', error);
+        res.status(500).json({
+            error: 'CSV Import fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
 // Error handling
 app.use((err, req, res, next) => {
     console.error('Server Error:', err.stack);
