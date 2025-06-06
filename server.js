@@ -9,13 +9,19 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 // Middleware
-app.use(cors({('/api/auth/login
+app.use(cors({
     origin: ['https://expertise-zeigen.de', 'https://www.expertise-zeigen.de', '*'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'multipart/form-data'],
     credentials: false
 }));
 app.use(express.json());
+
+// Configure multer for file uploads
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
 
 // SQLite Database - Railway persistent storage
 const dbPath = process.env.NODE_ENV === 'production' 
@@ -165,7 +171,9 @@ app.get('/', (req, res) => {
             'GET /api/appointments',
             'GET /api/drivers',
             'POST /api/routes/optimize',
-            'POST /api/admin/seed'
+            'POST /api/admin/seed',
+            'POST /api/admin/preview-csv',
+            'POST /api/admin/import-csv'
         ]
     });
 });
@@ -424,11 +432,6 @@ app.get('/api/admin/status', (req, res) => {
         });
     });
 });
-// Configure multer for file uploads
-const upload = multer({ 
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
-});
 
 // CSV Preview endpoint
 app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
@@ -539,7 +542,8 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
             // Priority logic
             let priority = 'mittel';
             const company = (row['Customer Company'] || '').toLowerCase();
-            if (company.includes('bmw') || company.includes('mercedes') || company.includes('audi')) {
+            if (company.includes('bmw') || company.includes('mercedes') || company.includes('audi') || 
+                company.includes('porsche') || company.includes('volkswagen')) {
                 priority = 'hoch';
             }
 
@@ -567,6 +571,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
             let insertedCount = 0;
+            let errors = [];
 
             processedAppointments.forEach((apt) => {
                 stmt.run([
@@ -574,24 +579,43 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                     apt.duration, apt.pipeline_days, apt.notes,
                     JSON.stringify([]), JSON.stringify([])
                 ], (err) => {
-                    if (!err) insertedCount++;
+                    if (err) {
+                        errors.push(`${apt.customer}: ${err.message}`);
+                    } else {
+                        insertedCount++;
+                    }
                     
-                    if (insertedCount === processedAppointments.length) {
+                    if (insertedCount + errors.length === processedAppointments.length) {
                         stmt.finalize();
                         res.json({
                             success: true,
                             message: 'CSV Import abgeschlossen',
                             stats: {
                                 totalRows: parsed.data.length,
+                                processed: processedAppointments.length,
                                 inserted: insertedCount,
                                 confirmed: confirmedCount,
                                 proposals: proposalCount,
-                                skipped: skippedCount
-                            }
+                                skipped: skippedCount,
+                                errors: errors.length
+                            },
+                            errors: errors.length > 0 ? errors : undefined
                         });
                     }
                 });
             });
+
+            if (processedAppointments.length === 0) {
+                stmt.finalize();
+                res.json({
+                    success: false,
+                    message: 'Keine gültigen Termine in der CSV gefunden',
+                    stats: {
+                        totalRows: parsed.data.length,
+                        skipped: skippedCount
+                    }
+                });
+            }
         });
 
     } catch (error) {
@@ -602,6 +626,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
         });
     }
 });
+
 // Error handling
 app.use((err, req, res, next) => {
     console.error('Server Error:', err.stack);
