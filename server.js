@@ -192,11 +192,6 @@ app.post('/api/auth/login', function(req, res) {
         res.status(401).json({ error: 'Invalid password' });
     }
 });
-    } else {
-        res.status(401).json({ error: 'Invalid password' });
-    }
-});
-
 // Get appointments
 app.get('/api/appointments', (req, res) => {
     db.all("SELECT * FROM appointments ORDER BY created_at DESC", (err, rows) => {
