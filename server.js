@@ -813,119 +813,6 @@ class IntelligentRoutePlanner {
             weekUtilization: (totalWorkTime + totalTravelTime) / this.constraints.maxWorkHoursPerWeek
         };
     }
-// ======================================================================
-// FAHRZEITEN UND PAUSEN ZUM KALENDER HINZUFÜGEN
-// ======================================================================
-function addTravelSegmentsToResult(optimizedResult, appointments) {
-    console.log('🚗 Füge Fahrzeiten zum Kalender hinzu...');
-    
-    optimizedResult.days.forEach((day, dayIndex) => {
-        if (day.appointments.length === 0) return;
-        
-        day.travelSegments = [];
-        let currentLocation = 'home';
-        let currentTime = 8.5; // 8:30 Start
-        
-        day.appointments.forEach((apt, aptIndex) => {
-            const startTime = parseTimeToHours(apt.startTime);
-            
-            // Fahrt zum Termin
-            if (currentLocation !== apt.id) {
-                const travelTime = calculateTravelTime(currentLocation, apt, appointments);
-                const travelStart = startTime - travelTime;
-                
-                day.travelSegments.push({
-                    type: 'travel',
-                    from: currentLocation === 'home' ? 'Hannover' : currentLocation,
-                    to: apt.customer,
-                    startTime: formatTime(travelStart),
-                    endTime: apt.startTime,
-                    duration: travelTime,
-                    distance: estimateDistance(apt.address),
-                    description: currentLocation === 'home' ? 
-                        'Fahrt von Hannover' : 
-                        `Fahrt zum nächsten Termin`
-                });
-                
-                currentTime = startTime + apt.duration;
-                currentLocation = apt.id;
-            }
-            
-            // Pause zwischen Terminen (falls nötig)
-            if (aptIndex < day.appointments.length - 1) {
-                const nextApt = day.appointments[aptIndex + 1];
-                const nextStart = parseTimeToHours(nextApt.startTime);
-                const appointmentEnd = startTime + apt.duration;
-                
-                if (nextStart - appointmentEnd > 0.5) { // Mehr als 30min Pause
-                    day.travelSegments.push({
-                        type: 'pause',
-                        from: apt.customer,
-                        to: apt.customer,
-                        startTime: formatTime(appointmentEnd),
-                        endTime: formatTime(nextStart - 0.5),
-                        duration: nextStart - appointmentEnd - 0.5,
-                        description: 'Pause / Vorbereitung'
-                    });
-                }
-            }
-        });
-        
-        // Rückreise am Freitag
-        if (dayIndex === 4 && day.appointments.length > 0) {
-            const lastApt = day.appointments[day.appointments.length - 1];
-            const returnStart = parseTimeToHours(lastApt.endTime);
-            
-            day.travelSegments.push({
-                type: 'return',
-                from: lastApt.customer,
-                to: 'Hannover',
-                startTime: lastApt.endTime,
-                endTime: formatTime(returnStart + 2),
-                duration: 2,
-                distance: estimateDistance(lastApt.address),
-                description: 'Rückkehr nach Hannover'
-            });
-        }
-        
-        // Übernachtung planen wenn sinnvoll
-        if (dayIndex < 4 && day.appointments.length > 0) {
-            planOptimalOvernight(day, dayIndex);
-        }
-    });
-}
-
-function calculateTravelTime(from, to, appointments) {
-    // Vereinfachte Reisezeitberechnung
-    if (from === 'home') return 2; // 2h von Hannover
-    return 0.5; // 30min zwischen Terminen
-}
-
-function planOptimalOvernight(day, dayIndex) {
-    const lastApt = day.appointments[day.appointments.length - 1];
-    const city = extractCityFromAddress(lastApt.address);
-    
-    // Nur Übernachtung wenn > 150km von Hannover
-    const distance = estimateDistanceFromHannover(lastApt.address);
-    
-    if (distance > 150) {
-        day.overnight = {
-            city: city,
-            description: `Hotel in ${city} - Optimaler Stopp`,
-            startTime: formatTime(18),
-            type: 'overnight'
-        };
-    }
-}
-
-function estimateDistanceFromHannover(address) {
-    const addr = address.toLowerCase();
-    if (addr.includes('münchen')) return 450;
-    if (addr.includes('berlin')) return 280;
-    if (addr.includes('köln')) return 200;
-    if (addr.includes('hamburg')) return 150;
-    return 180; // Default
-}
     // ======================================================================
     // ERGEBNIS FORMATIEREN
     // ======================================================================
@@ -1434,7 +1321,7 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
                 route: createEmptyWeekStructure(weekStart)
             });
         }
-
+        
         // 6. ECHTE ROUTENOPTIMIERUNG mit maximaler Effizienz
         const optimizedRoute = await performMaxEfficiencyOptimization(selectedAppointments, weekStart, driverId);
 
@@ -1543,8 +1430,39 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
         
         const optimizedResult = await planner.optimizeWeek(optimizableAppointments, weekStart, driverId || 1);
         
-        // Füge Fahrzeiten und Pausen hinzu
-        addTravelSegmentsToResult(optimizedResult, optimizableAppointments);
+        // Füge Fahrzeiten hinzu (einfache Version)
+        optimizedResult.days.forEach((day, dayIndex) => {
+            if (!day.travelSegments) day.travelSegments = [];
+            
+            day.appointments.forEach((apt, aptIndex) => {
+                if (aptIndex === 0) {
+                    day.travelSegments.push({
+                        type: 'travel',
+                        from: 'Hannover',
+                        to: apt.customer || apt.invitee_name,
+                        startTime: formatTime(parseFloat(apt.startTime.replace(':', '.')) - 2),
+                        endTime: apt.startTime,
+                        duration: 2,
+                        distance: '180 km',
+                        description: 'Fahrt von Hannover'
+                    });
+                }
+            });
+            
+            if (dayIndex === 4 && day.appointments.length > 0) {
+                const lastApt = day.appointments[day.appointments.length - 1];
+                day.travelSegments.push({
+                    type: 'return',
+                    from: lastApt.customer || lastApt.invitee_name,
+                    to: 'Hannover',
+                    startTime: lastApt.endTime,
+                    endTime: formatTime(parseFloat(lastApt.endTime.replace(':', '.')) + 2),
+                    duration: 2,
+                    distance: '180 km',
+                    description: 'Rückkehr nach Hannover'
+                });
+            }
+        });
         
         return optimizedResult;
         
