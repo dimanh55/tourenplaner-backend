@@ -1563,8 +1563,6 @@ app.all('/api/admin/seed', (req, res) => {
 });
 
 // Admin endpoint to check database
-Hier ist die Fortsetzung der server.js Datei:
-javascript// Admin endpoint to check database status
 app.get('/api/admin/status', (req, res) => {
     db.get("SELECT COUNT(*) as count FROM appointments WHERE (on_hold IS NULL OR on_hold = '')", (err, row) => {
         if (err) {
