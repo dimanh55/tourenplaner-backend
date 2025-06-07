@@ -28,8 +28,8 @@ class IntelligentRoutePlanner {
             maxWorkHoursPerWeek: 40,
             maxWorkHoursPerDay: 8,
             flexWorkHoursPerDay: 10, // Ausnahme möglich
-            workStartTime: 8, // 8:00 Uhr
-            workEndTime: 17, // 17:00 Uhr (zurück im Büro)
+            workStartTime: 8.5, // 8:30 Uhr
+            workEndTime: 18.5, // 18:30 Uhr (maximale 10h Tag)
             appointmentDuration: 3, // Stunden pro Dreh
             homeBase: { 
                 lat: 52.3731, 
@@ -444,7 +444,11 @@ class IntelligentRoutePlanner {
             if (dayIndex >= 0 && dayIndex < 5) {
                 const day = week[dayIndex];
                 const [hours, minutes] = appointment.fixed_time.split(':').map(Number);
-                const startTime = hours + minutes / 60;
+                let startTime = hours + minutes / 60;
+                if (startTime < 9) {
+                    startTime = 9;
+                }
+                startTime = this.roundToHalfHour(startTime);
                 
                 // Reisezeit vom aktuellen Standort berechnen
                 const travelFromCurrent = travelMatrix[day.currentLocation]?.[appointment.id];
@@ -462,8 +466,13 @@ class IntelligentRoutePlanner {
     // ======================================================================
     async scheduleFlexibleAppointments(week, appointments, travelMatrix) {
         console.log(`📋 Plane ${appointments.length} flexible Termine...`);
-        
+
         for (const appointment of appointments) {
+            const currentWeekHours = week.reduce((sum, d) => sum + d.workTime, 0);
+            if (currentWeekHours + this.constraints.appointmentDuration > this.constraints.maxWorkHoursPerWeek) {
+                console.warn('⚠️ Wöchentliche Arbeitszeit erreicht, weitere Termine werden nicht eingeplant');
+                break;
+            }
             const bestSlot = this.findBestTimeSlot(week, appointment, travelMatrix);
             
             if (bestSlot) {
@@ -498,10 +507,16 @@ class IntelligentRoutePlanner {
             if (!travelFromCurrent) continue;
 
             // Frühester Starttermin
-            const earliestStart = day.lastAppointmentEnd + travelFromCurrent.duration;
-            
+            let earliestStart = day.lastAppointmentEnd + travelFromCurrent.duration;
+            earliestStart = Math.max(earliestStart, 9);
+            earliestStart = this.roundToHalfHour(earliestStart);
+
             // Prüfe ob der Termin an diesem Tag noch passt
             const appointmentEnd = earliestStart + this.constraints.appointmentDuration;
+
+            if (appointmentEnd - this.constraints.workStartTime > maxAllowed) {
+                continue; // Überschreitet maximale Tagesarbeitszeit
+            }
             
             // Bei Freitag: Muss Rückkehr möglich sein
             if (dayIndex === 4) {
@@ -590,7 +605,7 @@ class IntelligentRoutePlanner {
         // Termin hinzufügen
         day.appointments.push({
             ...appointment,
-            startTime: appointment.fixed_time,
+            startTime: this.formatTime(startTime),
             endTime: this.formatTime(startTime + this.constraints.appointmentDuration),
             travelTimeThere: travelData.duration,
             customer: appointment.invitee_name,
@@ -851,6 +866,10 @@ class IntelligentRoutePlanner {
         const h = Math.floor(hours);
         const m = Math.round((hours - h) * 60);
         return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    }
+
+    roundToHalfHour(hours) {
+        return Math.ceil(hours * 2) / 2;
     }
 
     getDayIndex(date, weekStartDate) {
