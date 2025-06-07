@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
 const Papa = require('papaparse');
+const axios = require('axios');
 require('dotenv').config();
 
 // Debug: Umgebungsvariablen prüfen
@@ -19,10 +20,8 @@ if (!process.env.GOOGLE_MAPS_API_KEY) {
 }
 
 // ======================================================================
-// INTELLIGENTE ROUTENPLANUNG INTEGRATION
+// INTELLIGENTE ROUTENPLANUNG KLASSE
 // ======================================================================
-const axios = require('axios');
-
 class IntelligentRoutePlanner {
     constructor() {
         this.constraints = {
@@ -878,7 +877,48 @@ class IntelligentRoutePlanner {
     }
 }
 
-module.exports = IntelligentRoutePlanner;
+// ======================================================================
+// EXPRESS APP SETUP
+// ======================================================================
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// Middleware
+app.use(cors({
+    origin: ['https://expertise-zeigen.de', 'https://www.expertise-zeigen.de', 'http://localhost:3000'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false
+}));
+app.use(express.json());
+
+// Configure multer for file uploads
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
+
+// SQLite Database - Railway persistent storage
+const dbPath = process.env.NODE_ENV === 'production' 
+    ? '/app/data/expertise_tours.db' 
+    : './expertise_tours.db';
+
+// Ensure data directory exists in production
+if (process.env.NODE_ENV === 'production') {
+    const fs = require('fs');
+    if (!fs.existsSync('/app/data')) {
+        fs.mkdirSync('/app/data', { recursive: true });
+    }
+}
+
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error('❌ Database connection failed:', err.message);
+    } else {
+        console.log('✅ Connected to SQLite database:', dbPath);
+        initializeDatabase();
+    }
+});
 
 // Initialize database tables and sample data
 function initializeDatabase() {
@@ -1078,6 +1118,7 @@ app.get('/api/health', (req, res) => {
             'maximum_efficiency'
         ],
         google_maps: hasApiKey ? '✅ Configured' : '⚠️ Fallback Mode',
+        home_base: 'Kurt-Schumacher-Straße 34, 30159 Hannover',
         debug: {
             api_key_exists: hasApiKey,
             api_key_length: apiKeyLength,
