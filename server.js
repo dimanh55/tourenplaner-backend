@@ -2040,12 +2040,20 @@ app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
 
     try {
         const csvContent = req.file.buffer.toString('utf-8');
+        
+        // KORRIGIERTE PARSING-OPTIONEN: Auto-detect delimiter
         const parsed = Papa.parse(csvContent, {
             header: true,
             skipEmptyLines: true,
-            delimiter: ',',
-            encoding: 'utf-8'
+            delimiter: '', // Auto-detect: Papa wird ; oder , automatisch erkennen
+            encoding: 'utf-8',
+            dynamicTyping: false, // Alles als String lassen
+            delimitersToGuess: [',', ';', '\t', '|'] // Mögliche Trennzeichen
         });
+
+        console.log('📊 CSV Preview - Parsed meta:', parsed.meta);
+        console.log('📊 CSV Preview - First row:', parsed.data[0]);
+        console.log('📊 CSV Preview - Delimiter detected:', parsed.meta.delimiter);
 
         // Enhanced analysis with person-focused structure
         const analysis = {
@@ -2055,32 +2063,63 @@ app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
             proposalAppointments: 0,
             onHoldAppointments: 0,
             missingInvitee: 0,
-            sampleRows: parsed.data.slice(0, 5).map(row => ({
-                invitee_name: row['Invitee Name'],
-                company: row['Company'],
-                customer_company: row['Customer Company'],
-                has_appointment: !!(row['Start Date & Time'] && row['Start Date & Time'].trim()),
-                on_hold: !!(row['On Hold'] && row['On Hold'].trim()),
-                address: row['Adresse'] || `${row['Straße & Hausnr.'] || ''}, ${row['PLZ'] || ''} ${row['Ort'] || ''}`.trim()
-            }))
+            sampleRows: []
         };
 
-        parsed.data.forEach(row => {
-            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+        // KORRIGIERTE DATENANALYSE
+        parsed.data.forEach((row, index) => {
+            // Debug erste 3 Zeilen
+            if (index < 3) {
+                console.log(`Row ${index + 1}:`, row);
+            }
+
+            // Zähle verschiedene Kategorien
+            const inviteeName = row['Invitee Name'] || '';
+            const onHold = row['On Hold'] || '';
+            const startDateTime = row['Start Date & Time'] || '';
+
+            if (onHold && onHold.trim() !== '') {
                 analysis.onHoldAppointments++;
-            } else if (!row['Invitee Name'] || row['Invitee Name'].trim() === '') {
+            } else if (!inviteeName || inviteeName.trim() === '') {
                 analysis.missingInvitee++;
-            } else if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
+            } else if (startDateTime && startDateTime.trim() !== '') {
                 analysis.confirmedAppointments++;
             } else {
                 analysis.proposalAppointments++;
             }
+
+            // Sample rows für Preview
+            if (index < 5) {
+                analysis.sampleRows.push({
+                    invitee_name: inviteeName,
+                    company: row['Company'] || '',
+                    customer_company: row['Customer Company'] || '',
+                    has_appointment: !!(startDateTime && startDateTime.trim()),
+                    on_hold: !!(onHold && onHold.trim()),
+                    address: row['Adresse'] || `${row['Straße & Hausnr.'] || ''}, ${row['PLZ'] || ''} ${row['Ort'] || ''}`.trim(),
+                    start_date_time: startDateTime
+                });
+            }
+        });
+
+        console.log('📈 Analysis result:', {
+            total: analysis.totalRows,
+            confirmed: analysis.confirmedAppointments,
+            proposals: analysis.proposalAppointments,
+            onHold: analysis.onHoldAppointments,
+            missing: analysis.missingInvitee
         });
 
         res.json({
             success: true,
             analysis: analysis,
             message: 'CSV Vorschau erstellt - Testimonial Person-fokussierte Struktur',
+            meta: {
+                delimiter: parsed.meta.delimiter,
+                fields_count: parsed.meta.fields.length,
+                truncated: parsed.meta.truncated,
+                error: parsed.errors.length > 0 ? parsed.errors[0] : null
+            },
             data_structure: {
                 primary_name: 'Invitee Name (Person für Testimonial)',
                 company_info: 'Company (Firma der Person)',
@@ -2090,6 +2129,7 @@ app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
         });
 
     } catch (error) {
+        console.error('❌ CSV Preview Fehler:', error);
         res.status(500).json({
             error: 'CSV Analyse fehlgeschlagen',
             details: error.message
@@ -2097,7 +2137,7 @@ app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
     }
 });
 
-// CSV Import endpoint for testimonial data
+// CSV Import endpoint for testimonial data - KORRIGIERT
 app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
@@ -2107,14 +2147,20 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
     
     try {
         const csvContent = req.file.buffer.toString('utf-8');
+        
+        // KORRIGIERTE PARSING-OPTIONEN
         const parsed = Papa.parse(csvContent, {
             header: true,
             skipEmptyLines: true,
-            delimiter: ',',
-            encoding: 'utf-8'
+            delimiter: '', // Auto-detect
+            encoding: 'utf-8',
+            dynamicTyping: false,
+            delimitersToGuess: [',', ';', '\t', '|']
         });
 
         console.log(`📊 ${parsed.data.length} Zeilen gefunden`);
+        console.log('📊 Delimiter detected:', parsed.meta.delimiter);
+        console.log('📊 Columns found:', parsed.meta.fields);
 
         const processedAppointments = [];
         let skippedCount = 0;
@@ -2122,6 +2168,17 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
         let proposalCount = 0;
 
         parsed.data.forEach((row, index) => {
+            // Debug erste paar Zeilen
+            if (index < 3) {
+                console.log(`Processing row ${index + 1}:`, {
+                    invitee: row['Invitee Name'],
+                    company: row['Company'],
+                    customer: row['Customer Company'],
+                    onHold: row['On Hold'],
+                    startTime: row['Start Date & Time']
+                });
+            }
+
             // Skip if "On Hold" is filled
             if (row['On Hold'] && row['On Hold'].trim() !== '') {
                 console.log(`Skipping row ${index + 1}: On Hold = "${row['On Hold']}"`);
@@ -2155,15 +2212,36 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
             if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
                 try {
                     const dateTimeStr = row['Start Date & Time'].trim();
-                    // Parse verschiedene Datumsformate
-                    const dateTime = new Date(dateTimeStr);
+                    console.log(`Parsing datetime: "${dateTimeStr}"`);
+                    
+                    // Verschiedene deutsche Datumsformate unterstützen
+                    let dateTime;
+                    
+                    // Format: "DD.MM.YYYY HH:MM" oder "DD/MM/YYYY HH:MM"
+                    if (dateTimeStr.match(/\d{1,2}[\.\/]\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}/)) {
+                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+                        const [day, month, year] = datePart.split(/[\.\/]/);
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                    }
+                    // Format: "YYYY-MM-DD HH:MM" (ISO-ähnlich)
+                    else if (dateTimeStr.match(/\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                        dateTime = new Date(dateTimeStr);
+                    }
+                    // Fallback: Versuche native Date-Parsing
+                    else {
+                        dateTime = new Date(dateTimeStr);
+                    }
+                    
                     if (!isNaN(dateTime.getTime())) {
                         isFixed = true;
                         fixedDate = dateTime.toISOString().split('T')[0];
                         fixedTime = `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`;
+                        console.log(`✅ Parsed: ${dateTimeStr} → ${fixedDate} ${fixedTime}`);
+                    } else {
+                        console.log(`❌ Invalid date: ${dateTimeStr}`);
                     }
                 } catch (e) {
-                    console.log(`Datum parsing fehlgeschlagen für: ${row['Start Date & Time']}`);
+                    console.log(`❌ Date parsing failed for: ${row['Start Date & Time']} - ${e.message}`);
                 }
             }
 
@@ -2229,6 +2307,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
         });
 
         console.log(`📈 Processing complete: ${processedAppointments.length} testimonial appointments, ${skippedCount} skipped`);
+        console.log(`📊 Breakdown: ${confirmedCount} confirmed, ${proposalCount} proposals`);
 
         // Clear existing appointments and insert new ones
         db.run("DELETE FROM appointments", (err) => {
@@ -2286,6 +2365,11 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                                 skipped: skippedCount,
                                 errors: errors.length
                             },
+                            debug: {
+                                delimiter: parsed.meta.delimiter,
+                                columns: parsed.meta.fields,
+                                sample_processed: processedAppointments.slice(0, 2)
+                            },
                             sample_data: processedAppointments.slice(0, 3).map(apt => ({
                                 name: apt.customer,
                                 is_fixed: apt.is_fixed,
@@ -2310,6 +2394,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                         skipped: skippedCount
                     },
                     debug_info: {
+                        delimiter: parsed.meta.delimiter,
                         sample_rows: parsed.data.slice(0, 3),
                         required_columns: ['Invitee Name'],
                         found_columns: parsed.meta.fields
