@@ -1185,8 +1185,7 @@ app.post('/api/auth/login', function(req, res) {
 
 // Get appointments (exclude on_hold)
 app.get('/api/appointments', (req, res) => {
-    db.all("SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
- ORDER BY created_at DESC", (err, rows) => {
+    db.all("SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') ORDER BY created_at DESC", (err, rows) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
