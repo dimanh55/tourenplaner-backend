@@ -813,7 +813,119 @@ class IntelligentRoutePlanner {
             weekUtilization: (totalWorkTime + totalTravelTime) / this.constraints.maxWorkHoursPerWeek
         };
     }
+// ======================================================================
+// FAHRZEITEN UND PAUSEN ZUM KALENDER HINZUFÜGEN
+// ======================================================================
+function addTravelSegmentsToResult(optimizedResult, appointments) {
+    console.log('🚗 Füge Fahrzeiten zum Kalender hinzu...');
+    
+    optimizedResult.days.forEach((day, dayIndex) => {
+        if (day.appointments.length === 0) return;
+        
+        day.travelSegments = [];
+        let currentLocation = 'home';
+        let currentTime = 8.5; // 8:30 Start
+        
+        day.appointments.forEach((apt, aptIndex) => {
+            const startTime = parseTimeToHours(apt.startTime);
+            
+            // Fahrt zum Termin
+            if (currentLocation !== apt.id) {
+                const travelTime = calculateTravelTime(currentLocation, apt, appointments);
+                const travelStart = startTime - travelTime;
+                
+                day.travelSegments.push({
+                    type: 'travel',
+                    from: currentLocation === 'home' ? 'Hannover' : currentLocation,
+                    to: apt.customer,
+                    startTime: formatTime(travelStart),
+                    endTime: apt.startTime,
+                    duration: travelTime,
+                    distance: estimateDistance(apt.address),
+                    description: currentLocation === 'home' ? 
+                        'Fahrt von Hannover' : 
+                        `Fahrt zum nächsten Termin`
+                });
+                
+                currentTime = startTime + apt.duration;
+                currentLocation = apt.id;
+            }
+            
+            // Pause zwischen Terminen (falls nötig)
+            if (aptIndex < day.appointments.length - 1) {
+                const nextApt = day.appointments[aptIndex + 1];
+                const nextStart = parseTimeToHours(nextApt.startTime);
+                const appointmentEnd = startTime + apt.duration;
+                
+                if (nextStart - appointmentEnd > 0.5) { // Mehr als 30min Pause
+                    day.travelSegments.push({
+                        type: 'pause',
+                        from: apt.customer,
+                        to: apt.customer,
+                        startTime: formatTime(appointmentEnd),
+                        endTime: formatTime(nextStart - 0.5),
+                        duration: nextStart - appointmentEnd - 0.5,
+                        description: 'Pause / Vorbereitung'
+                    });
+                }
+            }
+        });
+        
+        // Rückreise am Freitag
+        if (dayIndex === 4 && day.appointments.length > 0) {
+            const lastApt = day.appointments[day.appointments.length - 1];
+            const returnStart = parseTimeToHours(lastApt.endTime);
+            
+            day.travelSegments.push({
+                type: 'return',
+                from: lastApt.customer,
+                to: 'Hannover',
+                startTime: lastApt.endTime,
+                endTime: formatTime(returnStart + 2),
+                duration: 2,
+                distance: estimateDistance(lastApt.address),
+                description: 'Rückkehr nach Hannover'
+            });
+        }
+        
+        // Übernachtung planen wenn sinnvoll
+        if (dayIndex < 4 && day.appointments.length > 0) {
+            planOptimalOvernight(day, dayIndex);
+        }
+    });
+}
 
+function calculateTravelTime(from, to, appointments) {
+    // Vereinfachte Reisezeitberechnung
+    if (from === 'home') return 2; // 2h von Hannover
+    return 0.5; // 30min zwischen Terminen
+}
+
+function planOptimalOvernight(day, dayIndex) {
+    const lastApt = day.appointments[day.appointments.length - 1];
+    const city = extractCityFromAddress(lastApt.address);
+    
+    // Nur Übernachtung wenn > 150km von Hannover
+    const distance = estimateDistanceFromHannover(lastApt.address);
+    
+    if (distance > 150) {
+        day.overnight = {
+            city: city,
+            description: `Hotel in ${city} - Optimaler Stopp`,
+            startTime: formatTime(18),
+            type: 'overnight'
+        };
+    }
+}
+
+function estimateDistanceFromHannover(address) {
+    const addr = address.toLowerCase();
+    if (addr.includes('münchen')) return 450;
+    if (addr.includes('berlin')) return 280;
+    if (addr.includes('köln')) return 200;
+    if (addr.includes('hamburg')) return 150;
+    return 180; // Default
+}
     // ======================================================================
     // ERGEBNIS FORMATIEREN
     // ======================================================================
@@ -1186,7 +1298,8 @@ app.post('/api/auth/login', function(req, res) {
 
 // Get appointments (exclude on_hold)
 app.get('/api/appointments', (req, res) => {
-    db.all("SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '') ORDER BY created_at DESC", (err, rows) => {
+    db.all("SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+ ORDER BY created_at DESC", (err, rows) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
@@ -1268,7 +1381,7 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
         const allAppointments = await new Promise((resolve, reject) => {
             db.all(`
                 SELECT * FROM appointments 
-                WHERE (on_hold IS NULL OR on_hold = '')
+                WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
                 ORDER BY 
                     is_fixed DESC,
                     CASE WHEN status = 'bestätigt' THEN 0 ELSE 1 END,
@@ -1355,52 +1468,34 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
 // MAXIMALE TERMINAUSWAHL FÜR WOCHE
 // ======================================================================
 async function selectMaxAppointmentsForWeek(fixedAppointmentsThisWeek, flexibleAppointments, weekStart, allAppointments) {
-    console.log(`🎯 Maximiere Termine für Woche ${weekStart}`);
+    console.log(`🎯 MAXIMIERE ALLE TERMINE für Woche ${weekStart}`);
     
-    const weekStartDate = new Date(weekStart);
-    
-    // 1. Alle fixen Termine dieser Woche müssen rein
+    // ALLE verfügbaren Termine verwenden (außer on hold)
     const selectedAppointments = [...fixedAppointmentsThisWeek];
-    console.log(`📌 ${fixedAppointmentsThisWeek.length} fixe Termine für diese Woche`);
     
-    // 2. Berechne verfügbare Kapazität
-    const maxTermineProTag = 3; // Mit Überstunden möglich
-    const maxTermineProWoche = 13; // 40h / 3h = ~13 Termine
-    const verbleibendeKapazität = maxTermineProWoche - selectedAppointments.length;
-    
-    // 3. Prüfe bereits verwendete Termine in anderen Wochen
+    // Bereits verwendete Termine prüfen
     const usedAppointmentIds = await getUsedAppointmentIds(weekStart);
     
-    // 4. Filtere verfügbare flexible Termine
+    // ALLE flexiblen Termine hinzufügen (nicht limitieren)
     const availableFlexible = flexibleAppointments.filter(apt => 
         !usedAppointmentIds.includes(apt.id) &&
         !selectedAppointments.some(selected => selected.id === apt.id)
     );
     
-    // 5. Sortiere nach Priorität für maximale Effizienz
+    // Nach Pipeline-Alter und Status sortieren
     const sortedFlexible = availableFlexible.sort((a, b) => {
-        // Bestätigte Termine zuerst
         if (a.status === 'bestätigt' && b.status !== 'bestätigt') return -1;
         if (b.status === 'bestätigt' && a.status !== 'bestätigt') return 1;
-        
-        // Pipeline-Alter (ältere zuerst)
-        if (a.pipeline_days !== b.pipeline_days) {
-            return b.pipeline_days - a.pipeline_days;
-        }
-        
-        // Priorität
-        const priorityOrder = { 'hoch': 3, 'mittel': 2, 'niedrig': 1 };
-        return (priorityOrder[b.priority] || 2) - (priorityOrder[a.priority] || 2);
+        return b.pipeline_days - a.pipeline_days;
     });
     
-    // 6. Fülle mit flexiblen Terminen bis zur maximalen Kapazität
-    const additionalAppointments = sortedFlexible.slice(0, verbleibendeKapazität);
-    selectedAppointments.push(...additionalAppointments);
+    // ALLE verfügbaren Termine hinzufügen
+    selectedAppointments.push(...sortedFlexible);
     
-    console.log(`✅ ${selectedAppointments.length} Termine für maximale Effizienz ausgewählt`);
+    console.log(`✅ MAXIMUM ERREICHT: ${selectedAppointments.length} Termine ausgewählt`);
     console.log(`   - ${fixedAppointmentsThisWeek.length} fixe Termine`);
-    console.log(`   - ${additionalAppointments.length} flexible Termine`);
-    console.log(`   - Auslastung: ${Math.round((selectedAppointments.length / maxTermineProWoche) * 100)}%`);
+    console.log(`   - ${sortedFlexible.length} flexible Termine`);
+    console.log(`   - 🎯 ZIEL: Alle verfügbaren Termine planen`);
     
     return selectedAppointments;
 }
@@ -1409,10 +1504,9 @@ async function selectMaxAppointmentsForWeek(fixedAppointmentsThisWeek, flexibleA
 // MAXIMALE EFFIZIENZ ROUTENOPTIMIERUNG
 // ======================================================================
 async function performMaxEfficiencyOptimization(appointments, weekStart, driverId) {
-    console.log('⚡ Starte maximale Effizienz-Optimierung...');
+    console.log('⚡ MAXIMALE EFFIZIENZ: Alle Termine planen...');
     
     try {
-        // Konvertiere Termine für Optimierung
         const optimizableAppointments = appointments.map(apt => {
             let parsedNotes = {};
             try {
@@ -1432,7 +1526,6 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
                 status: apt.status,
                 duration: apt.duration || 3,
                 pipeline_days: apt.pipeline_days || 0,
-                preferred_time: parsedNotes.start_time || null,
                 is_fixed: apt.is_fixed,
                 fixed_date: apt.fixed_date,
                 fixed_time: apt.fixed_time,
@@ -1440,23 +1533,23 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
             };
         });
 
-        // Verwende IntelligentRoutePlanner mit angepassten Constraints für maximale Effizienz
         const planner = new IntelligentRoutePlanner();
         
-        // Überschreibe Constraints für maximale Effizienz
-        planner.constraints.maxWorkHoursPerDay = 10; // Erlaube bis zu 10h wenn nötig
+        // NEUE CONSTRAINTS FÜR MAXIMALE TERMINE
+        planner.constraints.maxWorkHoursPerDay = 10;
         planner.constraints.flexWorkHoursPerDay = 10;
-        planner.constraints.maxTravelTimePerDay = 5; // Mehr Fahrzeit erlaubt
+        planner.constraints.maxTravelTimePerDay = 6; // Mehr Fahrzeit erlaubt
+        planner.constraints.optimizeForMaxAppointments = true;
         
         const optimizedResult = await planner.optimizeWeek(optimizableAppointments, weekStart, driverId || 1);
         
-        // Stelle sicher, dass fixe Termine zur richtigen Zeit sind
-        ensureFixedAppointmentsCorrect(optimizedResult, appointments);
+        // Füge Fahrzeiten und Pausen hinzu
+        addTravelSegmentsToResult(optimizedResult, optimizableAppointments);
         
         return optimizedResult;
         
     } catch (error) {
-        console.warn('⚠️ IntelligentRoutePlanner fehlgeschlagen, verwende Fallback:', error.message);
+        console.warn('⚠️ Planner fehlgeschlagen, verwende Fallback:', error.message);
         return performMaxEfficiencyFallback(appointments, weekStart);
     }
 }
@@ -2440,7 +2533,8 @@ app.all('/api/admin/seed', (req, res) => {
 
 // Admin endpoint to check database
 app.get('/api/admin/status', (req, res) => {
-    db.get("SELECT COUNT(*) as count FROM appointments WHERE (on_hold IS NULL OR on_hold = '')", (err, row) => {
+    db.get("SELECT COUNT(*) as count FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+", (err, row) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
