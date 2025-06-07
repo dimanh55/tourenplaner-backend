@@ -2449,9 +2449,38 @@ app.all('/api/admin/seed', (req, res) => {
 });
 
 // Admin endpoint to check database
+app.get('/api/appointments', (req, res) => {
+    db.all("SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') ORDER BY created_at DESC", (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        // Parse notes and enhance appointment data
+        const enhancedRows = rows.map(row => {
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(row.notes || '{}');
+            } catch (e) {
+                parsedNotes = {};
+            }
+            
+            return {
+                ...row,
+                invitee_name: parsedNotes.invitee_name || row.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || '',
+                start_time: parsedNotes.start_time || null
+            };
+        });
+        
+        res.json(enhancedRows);
+    });
+});
+
+// 2. Admin endpoint to check database - Zeile ~2453
 app.get('/api/admin/status', (req, res) => {
-    db.get("SELECT COUNT(*) as count FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
-", (err, row) => {
+    db.get("SELECT COUNT(*) as count FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')", (err, row) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
