@@ -176,6 +176,16 @@ function initializeDatabase() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
+    // Stelle sicher, dass IMMER ein Fahrer existiert
+    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
+            VALUES (1, 'Testimonial-Fahrer', 'Kurt-Schumacher-Straße 34, 30159 Hannover')`, (err) => {
+        if (err) {
+            console.error('❌ Fehler beim Einfügen des Fahrers:', err);
+        } else {
+            console.log('✅ Standard-Fahrer sichergestellt');
+        }
+    });
+
     // Insert sample data if tables are empty
     db.get("SELECT COUNT(*) as count FROM appointments", (err, row) => {
         if (!err && row.count === 0) {
@@ -244,11 +254,7 @@ function insertSampleData() {
         }
     ];
 
-    // Insert driver
-    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
-            VALUES (1, 'Max Mustermann', 'Hannover')`);
-
-    // Insert sample appointments
+    // Insert sample appointments (Fahrer wird bereits in initializeDatabase eingefügt)
     const stmt = db.prepare(`INSERT INTO appointments 
         (customer, address, priority, status, duration, pipeline_days, notes, fixed_date, fixed_time, is_fixed) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -1104,16 +1110,50 @@ app.get('/api/admin/status', (req, res) => {
                     return;
                 }
                 
-                res.json({
-                    database: 'connected',
-                    appointments_count: row.count,
-                    on_hold_count: row2.on_hold_count,
-                    fixed_appointments_count: row3.fixed_count,
-                    database_path: dbPath,
-                    type: 'max_efficiency_testimonial_planner',
-                    features: ['fixed_appointments', 'on_hold_filter', 'max_appointments_per_week'],
-                    google_maps_api: process.env.GOOGLE_MAPS_API_KEY ? 'configured' : 'fallback'
+                db.get("SELECT COUNT(*) as driver_count FROM drivers", (err4, row4) => {
+                    if (err4) {
+                        res.status(500).json({ error: err4.message });
+                        return;
+                    }
+                    
+                    res.json({
+                        database: 'connected',
+                        appointments_count: row.count,
+                        on_hold_count: row2.on_hold_count,
+                        fixed_appointments_count: row3.fixed_count,
+                        drivers_count: row4.driver_count,
+                        database_path: dbPath,
+                        type: 'max_efficiency_testimonial_planner',
+                        features: ['fixed_appointments', 'on_hold_filter', 'max_appointments_per_week'],
+                        google_maps_api: process.env.GOOGLE_MAPS_API_KEY ? 'configured' : 'fallback'
+                    });
                 });
+            });
+        });
+    });
+});
+
+// Admin endpoint to ensure driver exists
+app.post('/api/admin/ensure-driver', (req, res) => {
+    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
+            VALUES (1, 'Testimonial-Fahrer', 'Kurt-Schumacher-Straße 34, 30159 Hannover')`, function(err) {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        // Prüfe ob Fahrer jetzt existiert
+        db.get("SELECT * FROM drivers WHERE id = 1", (err2, driver) => {
+            if (err2) {
+                res.status(500).json({ error: err2.message });
+                return;
+            }
+            
+            res.json({
+                success: true,
+                message: 'Fahrer sichergestellt',
+                driver: driver,
+                was_inserted: this.changes > 0
             });
         });
     });
