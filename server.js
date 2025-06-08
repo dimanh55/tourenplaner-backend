@@ -7,6 +7,9 @@ const Papa = require('papaparse');
 const axios = require('axios');
 require('dotenv').config();
 
+// 🛡️ SICHERHEITS-IMPORTS
+const rateLimit = require('express-rate-limit');
+
 // Debug: Umgebungsvariablen prüfen
 console.log('🔍 Environment Variables Debug:');
 console.log('NODE_ENV:', process.env.NODE_ENV);
@@ -901,9 +904,72 @@ class IntelligentRoutePlanner {
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// 🛡️ SICHERHEITS-MIDDLEWARE
+// Rate Limiting für Login-Versuche
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 Minuten
+    max: 5, // Maximum 5 Login-Versuche
+    message: 'Zu viele Login-Versuche. Bitte warten Sie 15 Minuten.',
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Allgemeines Rate Limiting
+const generalLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 Minute
+    max: 100, // 100 Requests pro Minute
+    message: 'Zu viele Anfragen. Bitte warten Sie.',
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// 🚫 robots.txt Route (WICHTIG: Vor anderen Routes)
+app.get('/robots.txt', (req, res) => {
+    res.type('text/plain');
+    res.send(`User-agent: *
+Disallow: /
+
+User-agent: Googlebot
+Disallow: /
+
+User-agent: Bingbot
+Disallow: /
+
+User-agent: Slurp
+Disallow: /
+
+User-agent: DuckDuckBot
+Disallow: /
+
+User-agent: Baiduspider
+Disallow: /
+
+User-agent: facebookexternalhit
+Disallow: /`);
+});
+
+// 🛡️ Security Headers
+app.use((req, res, next) => {
+    // Suchmaschinen abweisen
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+    
+    // Weitere Security Headers
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    
+    next();
+});
+
 // Middleware
+app.use(generalLimiter); // Rate limiting für alle Requests
 app.use(cors({
-    origin: ['https://expertise-zeigen.de', 'https://www.expertise-zeigen.de', 'http://localhost:3000'],
+    origin: [
+        'https://expertise-zeigen.de', 
+        'https://www.expertise-zeigen.de'
+        // localhost ENTFERNT für Production-Sicherheit
+    ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: false
@@ -956,6 +1022,9 @@ function initializeDatabase() {
         fixed_time TEXT,
         is_fixed INTEGER DEFAULT 0,
         on_hold TEXT,
+        lat REAL,
+        lng REAL,
+        geocoded INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
