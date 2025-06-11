@@ -4,9 +4,11 @@
 // ======================================================================
 
 const axios = require('axios');
+const EnhancedGeocodingService = require('./geocoding-service');
 
 class IntelligentRoutePlanner {
     constructor() {
+        this.geocodingService = new EnhancedGeocodingService();
         this.constraints = {
             maxWorkHoursPerWeek: 40,
             maxWorkHoursPerDay: 8,
@@ -124,12 +126,13 @@ class IntelligentRoutePlanner {
         const geocoded = [];
         for (const apt of appointments) {
             try {
-                const coords = await this.geocodeAddress(apt.address);
+                const coords = await this.geocodingService.geocodeAddress(apt.address);
                 geocoded.push({
                     ...apt,
                     lat: coords.lat,
                     lng: coords.lng,
-                    geocoded: true
+                    geocoded: true,
+                    geocoding_method: coords.geocoding_method
                 });
                 console.log(`✅ Geocoded: ${apt.invitee_name} in ${apt.address}`);
             } catch (error) {
@@ -158,29 +161,7 @@ class IntelligentRoutePlanner {
     // EINZELNE ADRESSE GEOCODEN MIT GOOGLE MAPS API
     // ======================================================================
     async geocodeAddress(address) {
-        const apiKey = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
-        
-        try {
-            const response = await axios.get(`https://maps.googleapis.com/maps/api/geocode/json`, {
-                params: {
-                    address: address,
-                    key: apiKey,
-                    region: 'de',
-                    components: 'country:DE'
-                },
-                timeout: 5000
-            });
-
-            if (response.data.status === 'OK' && response.data.results.length > 0) {
-                const location = response.data.results[0].geometry.location;
-                return { lat: location.lat, lng: location.lng };
-            } else {
-                throw new Error(`Geocoding API Status: ${response.data.status}`);
-            }
-        } catch (error) {
-            console.warn('Google Maps Geocoding Fehler:', error.message);
-            throw error;
-        }
+        return this.geocodingService.geocodeAddress(address);
     }
 
     // ======================================================================
