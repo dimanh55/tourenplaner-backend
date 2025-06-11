@@ -889,6 +889,7 @@ planOvernightStops(week, travelMatrix) {
             estimatedDay: totalScheduled < 10 ? Math.floor(totalScheduled / 2) + 1 : 'Ende der Woche'
         };
     }
+}
 scheduleConfirmedAppointments
 scheduleProposalAppointments
 findBestSlotAnywhere
@@ -897,6 +898,4 @@ calculateRealisticScore
 forceScheduleAppointment
 estimateTravelTime
 planOvernightStops
-}
-
 module.exports = IntelligentRoutePlanner;
