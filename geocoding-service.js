@@ -10,6 +10,7 @@ class EnhancedGeocodingService {
         this.apiKey = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
         this.requestCount = 0;
         this.cache = new Map(); // Simple in-memory cache
+        this.googleApiDisabled = false;
         
         // Deutsche Städte mit präzisen Koordinaten
         this.germanCitiesDatabase = new Map([
@@ -180,7 +181,11 @@ class EnhancedGeocodingService {
     // GOOGLE MAPS API GEOCODING
     // ======================================================================
     async geocodeWithGoogleMaps(address) {
+        if (this.googleApiDisabled) {
+            throw new Error('Google Maps API deaktiviert');
+        }
         if (!this.apiKey || this.apiKey === 'YOUR_API_KEY_HERE') {
+            this.googleApiDisabled = true;
             throw new Error('Google Maps API Key nicht verfügbar');
         }
 
@@ -225,8 +230,12 @@ class EnhancedGeocodingService {
             } else if (error.response?.status === 429) {
                 throw new Error('Google Maps API Rate Limit erreicht');
             } else if (error.response?.status === 403) {
+                this.googleApiDisabled = true;
                 throw new Error('Google Maps API Key ungültig oder deaktiviert');
             } else {
+                if (error.response?.data?.status === 'REQUEST_DENIED') {
+                    this.googleApiDisabled = true;
+                }
                 throw new Error(`Google Maps API Fehler: ${error.message}`);
             }
         }
