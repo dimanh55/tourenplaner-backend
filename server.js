@@ -824,8 +824,15 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
         };
     });
     // Verarbeite zuerst fixe Termine
-    const fixedAppointments = allAppointments.filter(apt => apt.is_fixed && apt.fixed_date);
-    
+    const fixedAppointments = allAppointments
+        .filter(apt => apt.is_fixed && apt.fixed_date)
+        .sort((a, b) => {
+            if (a.fixed_date === b.fixed_date) {
+                return timeToHours(a.fixed_time || '00:00') - timeToHours(b.fixed_time || '00:00');
+            }
+            return new Date(a.fixed_date) - new Date(b.fixed_date);
+        });
+
     fixedAppointments.forEach(apt => {
         const dayIndex = weekDays.findIndex((_, i) => {
             const dayDate = new Date(startDate);
@@ -850,7 +857,6 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
     const regionOrder = optimizeRegionOrder(clusters, homeBase);
     
     let currentDayIndex = 0;
-    let appointmentsPlannedToday = 0;
     const MAX_APPOINTMENTS_PER_DAY = 3;
     const MAX_WORK_HOURS_PER_DAY = 12;
     
@@ -869,59 +875,45 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
         console.log(`\n🗺️ Plane Region ${region} mit ${regionAppointments.length} Terminen`);
         
         for (const apt of regionAppointments) {
-            // Finde besten Tag für diesen Termin
-            let bestDay = currentDayIndex;
-            let plannedSuccessfully = false;
-            
-            // Versuche aktuellen Tag
-            if (week[currentDayIndex].workTime + 3 <= MAX_WORK_HOURS_PER_DAY &&
-                appointmentsPlannedToday < MAX_APPOINTMENTS_PER_DAY) {
-                
-                const lastAppointment = week[currentDayIndex].appointments[week[currentDayIndex].appointments.length - 1];
-                const startTime = lastAppointment ? 
-                    addHoursToTime(lastAppointment.endTime, 1) : // 1h Fahrzeit
-                    '09:00';
-                
-                if (timeToHours(startTime) + 3 <= 18) { // Ende bis 18 Uhr
-                    week[currentDayIndex].appointments.push({
-                        ...apt,
-                        startTime: startTime,
-                        endTime: addHoursToTime(startTime, 3),
-                        duration: 3
-                    });
-                    week[currentDayIndex].workTime += 3;
-                    appointmentsPlannedToday++;
-                    plannedSuccessfully = true;
-                    console.log(`✅ ${apt.customer} → ${weekDays[currentDayIndex]} ${startTime}`);
+            let scheduled = false;
+
+            for (let dayIndex = currentDayIndex; dayIndex < 5; dayIndex++) {
+                const day = week[dayIndex];
+
+                if (day.workTime + 3 > MAX_WORK_HOURS_PER_DAY ||
+                    day.appointments.length >= MAX_APPOINTMENTS_PER_DAY) {
+                    continue;
                 }
-            }
-            
-            if (!plannedSuccessfully) {
-                // Nächster Tag
-                currentDayIndex++;
-                appointmentsPlannedToday = 0;
-                
-                if (currentDayIndex < 5) {
-                    week[currentDayIndex].appointments.push({
-                        ...apt,
-                        startTime: '09:00',
-                        endTime: '12:00',
-                        duration: 3
-                    });
-                    week[currentDayIndex].workTime += 3;
-                    appointmentsPlannedToday = 1;
-                    console.log(`✅ ${apt.customer} → ${weekDays[currentDayIndex]} 09:00 (neuer Tag)`);
-                } else {
-                    console.log(`❌ ${apt.customer} passt nicht mehr in die Woche`);
+
+                const lastAppointment = day.appointments[day.appointments.length - 1];
+                const startTime = lastAppointment ?
+                    addHoursToTime(lastAppointment.endTime, 1) : '09:00';
+
+                if (timeToHours(startTime) + 3 > 18) {
+                    continue;
                 }
+
+                day.appointments.push({
+                    ...apt,
+                    startTime,
+                    endTime: addHoursToTime(startTime, 3),
+                    duration: 3
+                });
+                day.workTime += 3;
+                console.log(`✅ ${apt.customer} → ${weekDays[dayIndex]} ${startTime}`);
+                currentDayIndex = dayIndex;
+                scheduled = true;
+                break;
             }
-            
-            if (currentDayIndex >= 5) break; // Woche voll
+
+            if (!scheduled) {
+                console.log(`❌ ${apt.customer} passt nicht mehr in die Woche`);
+            }
         }
-        
+
         if (currentDayIndex >= 5) break; // Woche voll
     }
-    
+
     return week;
 }
 
@@ -1092,6 +1084,7 @@ function timeToHours(timeStr) {
 }
 
 function hoursToTime(hours) {
+    hours = ((hours % 24) + 24) % 24; // Wrap around 24h and avoid negatives
     const h = Math.floor(hours);
     const m = Math.round((hours - h) * 60);
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
