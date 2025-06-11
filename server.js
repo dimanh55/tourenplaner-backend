@@ -605,7 +605,10 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
                 is_fixed: apt.is_fixed,
                 fixed_date: apt.fixed_date,
                 fixed_time: apt.fixed_time,
-                notes: apt.notes
+                notes: apt.notes,
+                lat: apt.lat,
+                lng: apt.lng,
+                geocoded: apt.geocoded
             };
         });
 
