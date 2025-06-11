@@ -1749,3 +1749,621 @@ app.post('/api/admin/ensure-driver', (req, res) => {
         });
     });
 });
+// ======================================================================
+// DEBUG ENDPOINTS FÜR GOOGLE MAPS API TESTS
+// ======================================================================
+
+// Debug: Test Google Maps API Zugang
+app.post('/api/debug/test-google-maps', validateSession, async (req, res) => {
+    const { test_type = 'api_access', test_address = 'Hannover, Deutschland' } = req.body;
+    
+    try {
+        console.log('🧪 Teste Google Maps API Zugang...');
+        
+        const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        if (!apiKey) {
+            throw new Error('Kein Google Maps API Key konfiguriert');
+        }
+        
+        // Test 1: Geocoding API
+        let geocodingTest = 'failed';
+        try {
+            const geocodeResponse = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+                params: {
+                    address: test_address,
+                    key: apiKey,
+                    region: 'de'
+                },
+                timeout: 5000
+            });
+            
+            if (geocodeResponse.data.status === 'OK') {
+                geocodingTest = 'success';
+            } else {
+                geocodingTest = `failed: ${geocodeResponse.data.status}`;
+            }
+        } catch (e) {
+            geocodingTest = `error: ${e.message}`;
+        }
+        
+        // Test 2: Distance Matrix API
+        let distanceTest = 'failed';
+        try {
+            const distanceResponse = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
+                params: {
+                    origins: 'Hannover, Deutschland',
+                    destinations: 'München, Deutschland',
+                    key: apiKey,
+                    units: 'metric'
+                },
+                timeout: 5000
+            });
+            
+            if (distanceResponse.data.status === 'OK') {
+                distanceTest = 'success';
+            } else {
+                distanceTest = `failed: ${distanceResponse.data.status}`;
+            }
+        } catch (e) {
+            distanceTest = `error: ${e.message}`;
+        }
+        
+        res.json({
+            success: true,
+            api_key_status: 'configured',
+            geocoding_test: geocodingTest,
+            distance_matrix_test: distanceTest,
+            api_key_first_chars: apiKey.substring(0, 10) + '...',
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('❌ Google Maps API Test fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            api_key_status: process.env.GOOGLE_MAPS_API_KEY ? 'configured' : 'missing'
+        });
+    }
+});
+
+// Debug: Geocode eine Adresse
+app.post('/api/debug/geocode', validateSession, async (req, res) => {
+    const { address } = req.body;
+    
+    if (!address) {
+        return res.status(400).json({ error: 'Adresse erforderlich' });
+    }
+    
+    try {
+        const startTime = Date.now();
+        const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        
+        const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+            params: {
+                address: address,
+                key: apiKey,
+                region: 'de',
+                components: 'country:DE'
+            },
+            timeout: 8000
+        });
+        
+        const responseTime = Date.now() - startTime;
+        
+        if (response.data.status === 'OK' && response.data.results.length > 0) {
+            const result = response.data.results[0];
+            const location = result.geometry.location;
+            
+            res.json({
+                success: true,
+                lat: location.lat,
+                lng: location.lng,
+                formatted_address: result.formatted_address,
+                place_id: result.place_id,
+                response_time: responseTime,
+                api_status: response.data.status,
+                results_count: response.data.results.length
+            });
+        } else {
+            throw new Error(`Geocoding Status: ${response.data.status}`);
+        }
+        
+    } catch (error) {
+        console.error('❌ Debug Geocoding fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            address: address
+        });
+    }
+});
+
+// Debug: Distance Matrix Test
+app.post('/api/debug/distance-matrix', validateSession, async (req, res) => {
+    const { origins, destinations } = req.body;
+    
+    if (!origins || !destinations) {
+        return res.status(400).json({ error: 'Origins und Destinations erforderlich' });
+    }
+    
+    try {
+        const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        const originsStr = Array.isArray(origins) ? origins.join('|') : origins;
+        const destinationsStr = Array.isArray(destinations) ? destinations.join('|') : destinations;
+        
+        const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
+            params: {
+                origins: originsStr,
+                destinations: destinationsStr,
+                key: apiKey,
+                units: 'metric',
+                mode: 'driving',
+                language: 'de'
+            },
+            timeout: 10000
+        });
+        
+        if (response.data.status === 'OK') {
+            const results = [];
+            
+            response.data.rows.forEach((row, i) => {
+                row.elements.forEach((element, j) => {
+                    if (element.status === 'OK') {
+                        results.push({
+                            origin: Array.isArray(origins) ? origins[i] : origins,
+                            destination: Array.isArray(destinations) ? destinations[j] : destinations,
+                            distance: `${(element.distance.value / 1000).toFixed(1)} km`,
+                            duration: `${Math.round(element.duration.value / 60)} min`,
+                            distance_value: element.distance.value,
+                            duration_value: element.duration.value
+                        });
+                    }
+                });
+            });
+            
+            res.json({
+                success: true,
+                results: results,
+                api_status: response.data.status,
+                origin_addresses: response.data.origin_addresses,
+                destination_addresses: response.data.destination_addresses
+            });
+        } else {
+            throw new Error(`Distance Matrix Status: ${response.data.status}`);
+        }
+        
+    } catch (error) {
+        console.error('❌ Debug Distance Matrix fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            origins: origins,
+            destinations: destinations
+        });
+    }
+});
+
+// Admin: Fix Geocoding für alle Termine
+app.post('/api/admin/fix-geocoding', validateSession, async (req, res) => {
+    try {
+        console.log('🔧 Starte Geocoding-Reparatur für alle Termine...');
+        
+        // Lade alle Termine ohne Koordinaten
+        const appointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, address 
+                FROM appointments 
+                WHERE (lat IS NULL OR lng IS NULL)
+                AND (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+        
+        console.log(`📊 ${appointments.length} Termine benötigen Geocoding`);
+        
+        let processed = 0;
+        let successful = 0;
+        let failed = 0;
+        
+        const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        if (!apiKey) {
+            throw new Error('Google Maps API Key nicht konfiguriert');
+        }
+        
+        // Geocode jeden Termin
+        for (const apt of appointments) {
+            try {
+                const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+                    params: {
+                        address: apt.address,
+                        key: apiKey,
+                        region: 'de',
+                        components: 'country:DE'
+                    },
+                    timeout: 5000
+                });
+                
+                if (response.data.status === 'OK' && response.data.results.length > 0) {
+                    const location = response.data.results[0].geometry.location;
+                    
+                    await new Promise((resolve, reject) => {
+                        db.run(
+                            "UPDATE appointments SET lat = ?, lng = ?, geocoded = 1 WHERE id = ?",
+                            [location.lat, location.lng, apt.id],
+                            (err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            }
+                        );
+                    });
+                    
+                    successful++;
+                    console.log(`✅ Geocoded: ${apt.customer} → ${location.lat}, ${location.lng}`);
+                } else {
+                    failed++;
+                    console.log(`❌ Geocoding fehlgeschlagen für ${apt.customer}: ${response.data.status}`);
+                }
+                
+                processed++;
+                
+                // Pause zwischen Requests
+                await new Promise(resolve => setTimeout(resolve, 200));
+                
+            } catch (error) {
+                failed++;
+                console.error(`❌ Fehler bei ${apt.customer}:`, error.message);
+            }
+        }
+        
+        res.json({
+            success: true,
+            message: 'Geocoding-Reparatur abgeschlossen',
+            processed: processed,
+            successful: successful,
+            failed: failed
+        });
+        
+    } catch (error) {
+        console.error('❌ Geocoding-Reparatur fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ======================================================================
+// SERVER INTEGRATION FÜR ENHANCED GEOCODING SERVICE
+// ======================================================================
+
+// Enhanced Geocoding Service importieren
+const EnhancedGeocodingService = require('./geocoding-service');
+
+// Service-Instanz erstellen
+const geocodingService = new EnhancedGeocodingService();
+
+// ======================================================================
+// NEUE API ROUTES FÜR GEOCODING
+// ======================================================================
+
+// Einzelne Adresse geocoden - Test Endpoint
+app.post('/api/geocoding/single', validateSession, async (req, res) => {
+    const { address } = req.body;
+    
+    if (!address) {
+        return res.status(400).json({ error: 'Adresse ist erforderlich' });
+    }
+    
+    try {
+        const result = await geocodingService.geocodeAddress(address);
+        res.json({
+            success: true,
+            address: address,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error(`❌ Geocoding Fehler für "${address}":`, error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            address: address
+        });
+    }
+});
+
+// Alle Termine geocoden - Hauptfunktion
+app.post('/api/geocoding/appointments', validateSession, async (req, res) => {
+    try {
+        console.log('🗺️ Starte Geocoding aller Termine...');
+        
+        // Alle Termine ohne gültige Koordinaten laden
+        const appointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, address, lat, lng, geocoded 
+                FROM appointments 
+                WHERE (lat IS NULL OR lng IS NULL OR geocoded != 1)
+                AND (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+                ORDER BY id
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        if (appointments.length === 0) {
+            return res.json({
+                success: true,
+                message: 'Alle Termine sind bereits geocoded',
+                processed: 0,
+                successful: 0,
+                failed: 0
+            });
+        }
+
+        console.log(`📊 ${appointments.length} Termine benötigen Geocoding`);
+
+        let successful = 0;
+        let failed = 0;
+        const errors = [];
+
+        // Batch-Geocoding mit Progress
+        const addresses = appointments.map(apt => apt.address);
+        const batchResult = await geocodingService.geocodeMultipleAddresses(addresses, {
+            maxConcurrent: 3, // Nicht zu aggressiv mit Google API
+            delayBetweenRequests: 300,
+            onProgress: (progress) => {
+                console.log(`📍 Geocoding Progress: ${progress.processed}/${progress.total} (${Math.round((progress.processed/progress.total)*100)}%)`);
+            }
+        });
+
+        // Ergebnisse in Datenbank speichern
+        const updatePromises = appointments.map(async (appointment, index) => {
+            const batchResultItem = batchResult.results[index];
+            
+            if (batchResultItem.success) {
+                const coords = batchResultItem.result;
+                
+                return new Promise((resolve, reject) => {
+                    db.run(`
+                        UPDATE appointments 
+                        SET lat = ?, lng = ?, geocoded = 1,
+                            notes = json_set(COALESCE(notes, '{}'), '$.geocoding_info', json(?))
+                        WHERE id = ?
+                    `, [
+                        coords.lat,
+                        coords.lng,
+                        JSON.stringify({
+                            method: coords.geocoding_method,
+                            accuracy: coords.accuracy,
+                            formatted_address: coords.formatted_address,
+                            processed_at: coords.processed_at
+                        }),
+                        appointment.id
+                    ], (err) => {
+                        if (err) {
+                            console.error(`❌ DB Update fehlgeschlagen für Termin ${appointment.id}:`, err);
+                            failed++;
+                            errors.push(`${appointment.customer}: DB Update fehlgeschlagen`);
+                            reject(err);
+                        } else {
+                            successful++;
+                            console.log(`✅ Termin ${appointment.id} (${appointment.customer}) geocoded: ${coords.lat}, ${coords.lng}`);
+                            resolve();
+                        }
+                    });
+                });
+            } else {
+                failed++;
+                errors.push(`${appointment.customer}: ${batchResultItem.error}`);
+                console.warn(`⚠️ Geocoding fehlgeschlagen für Termin ${appointment.id} (${appointment.customer}): ${batchResultItem.error}`);
+                return Promise.resolve();
+            }
+        });
+
+        await Promise.allSettled(updatePromises);
+
+        const cacheStats = geocodingService.getCacheStats();
+        
+        res.json({
+            success: true,
+            message: `Geocoding abgeschlossen: ${successful} erfolgreich, ${failed} fehlgeschlagen`,
+            processed: appointments.length,
+            successful: successful,
+            failed: failed,
+            errors: errors.slice(0, 10), // Nur erste 10 Fehler
+            cache_stats: cacheStats,
+            geocoding_methods: batchResult.results
+                .filter(r => r.success)
+                .reduce((acc, r) => {
+                    const method = r.result.geocoding_method;
+                    acc[method] = (acc[method] || 0) + 1;
+                    return acc;
+                }, {}),
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ Batch Geocoding fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Batch Geocoding fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// Geocoding Status und Statistiken
+app.get('/api/geocoding/status', validateSession, async (req, res) => {
+    try {
+        const stats = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT 
+                    COUNT(*) as total_appointments,
+                    COUNT(CASE WHEN lat IS NOT NULL AND lng IS NOT NULL THEN 1 END) as geocoded_appointments,
+                    COUNT(CASE WHEN lat IS NULL OR lng IS NULL THEN 1 END) as missing_coordinates,
+                    COUNT(CASE WHEN on_hold IS NOT NULL AND on_hold != '' THEN 1 END) as on_hold_appointments
+                FROM appointments
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows[0]);
+            });
+        });
+
+        const geocodingMethods = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT 
+                    json_extract(notes, '$.geocoding_info.method') as method,
+                    COUNT(*) as count
+                FROM appointments 
+                WHERE json_extract(notes, '$.geocoding_info.method') IS NOT NULL
+                GROUP BY json_extract(notes, '$.geocoding_info.method')
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        const cacheStats = geocodingService.getCacheStats();
+
+        res.json({
+            success: true,
+            database_stats: stats,
+            geocoding_methods: geocodingMethods.reduce((acc, row) => {
+                acc[row.method] = row.count;
+                return acc;
+            }, {}),
+            cache_stats: cacheStats,
+            coverage: stats.total_appointments > 0 ? 
+                Math.round((stats.geocoded_appointments / stats.total_appointments) * 100) : 0,
+            ready_for_optimization: stats.geocoded_appointments >= 2,
+            recommendations: [
+                stats.missing_coordinates > 0 ? 
+                    `${stats.missing_coordinates} Termine benötigen noch Geocoding` : 
+                    'Alle Termine sind geocoded ✅',
+                stats.geocoded_appointments >= 10 ? 
+                    'Bereit für intelligente Routenoptimierung ✅' : 
+                    'Mehr Termine für bessere Optimierung empfohlen'
+            ]
+        });
+
+    } catch (error) {
+        console.error('❌ Geocoding Status Fehler:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Geocoding Cache verwalten
+app.post('/api/geocoding/clear-cache', validateSession, (req, res) => {
+    try {
+        geocodingService.clearCache();
+        res.json({
+            success: true,
+            message: 'Geocoding Cache geleert'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Debug: Teste Google Maps API direkt
+app.post('/api/geocoding/test-google', validateSession, async (req, res) => {
+    const { address = 'Petuelring 130, 80809 München' } = req.body;
+    
+    try {
+        console.log('🧪 Teste Google Maps API direkt...');
+        
+        const result = await geocodingService.geocodeWithGoogleMaps(address);
+        
+        res.json({
+            success: true,
+            message: 'Google Maps API Test erfolgreich',
+            test_address: address,
+            result: result,
+            api_key_configured: !!process.env.GOOGLE_MAPS_API_KEY,
+            request_count: geocodingService.requestCount
+        });
+        
+    } catch (error) {
+        console.error('❌ Google Maps API Test fehlgeschlagen:', error);
+        res.json({
+            success: false,
+            message: 'Google Maps API Test fehlgeschlagen',
+            error: error.message,
+            test_address: address,
+            api_key_configured: !!process.env.GOOGLE_MAPS_API_KEY,
+            suggestions: [
+                'API Key in Railway Environment Variables prüfen',
+                'Geocoding API in Google Cloud Console aktivieren',
+                'Billing Account aktiviert?',
+                'API Quotas ausreichend?'
+            ]
+        });
+    }
+});
+
+console.log('🗺️ Enhanced Geocoding Service Endpoints hinzugefügt:');
+console.log('  POST /api/geocoding/single - Einzelne Adresse testen');
+console.log('  POST /api/geocoding/appointments - Alle Termine geocoden');
+console.log('  GET  /api/geocoding/status - Geocoding Statistiken');
+console.log('  POST /api/geocoding/clear-cache - Cache leeren');
+console.log('  POST /api/geocoding/test-google - Google Maps API testen');
+
+console.log('🐛 Debug Endpoints hinzugefügt:');
+console.log('  POST /api/debug/test-google-maps - Google Maps API testen');
+console.log('  POST /api/debug/geocode - Adresse geocoden');
+console.log('  POST /api/debug/distance-matrix - Entfernungen berechnen');
+console.log('  POST /api/admin/fix-geocoding - Alle Termine geocoden');
+
+// ======================================================================
+// ERROR HANDLING & 404
+// ======================================================================
+
+// Error handling
+app.use((err, req, res, next) => {
+    console.error('Server Error:', err.stack);
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+    res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// ======================================================================
+// SERVER START
+// ======================================================================
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Testimonial Tourenplaner Server running on port ${PORT}`);
+    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+    console.log(`⚡ Max Efficiency Planning: ENABLED`);
+    console.log(`📌 Fixed Appointments Support: ENABLED`);
+    console.log(`🚫 On Hold Filter: ACTIVE`);
+    console.log(`🗺️ Google Maps API: ${process.env.GOOGLE_MAPS_API_KEY ? '✅ Configured' : '⚠️ Fallback Mode'}`);
+    console.log(`✨ Features: Max Efficiency, Fixed Appointments, On Hold Filter, Google Maps`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('🛑 SIGTERM received, starting graceful shutdown...');
+    db.close((err) => {
+        if (err) {
+            console.error('Error closing database:', err.message);
+        } else {
+            console.log('✅ Database connection closed');
+        }
+        process.exit(0);
+    });
+});
