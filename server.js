@@ -1286,3 +1286,466 @@ function createEmptyWeekStructure(weekStart) {
         };
     });
 }
+function getWeekNumber(dateStr) {
+    const date = new Date(dateStr);
+    const start = new Date(date.getFullYear(), 0, 1);
+    const days = Math.floor((date - start) / (24 * 60 * 60 * 1000));
+    return Math.ceil((days + start.getDay() + 1) / 7);
+}
+
+async function saveRouteToDatabase(routeName, weekStart, driverId, routeData) {
+    return new Promise((resolve, reject) => {
+        // Erst alle Routen für diese Woche deaktivieren
+        db.run(
+            "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
+            [weekStart],
+            () => {
+                // Dann neue Route speichern
+                db.run(
+                    "INSERT INTO saved_routes (name, week_start, driver_id, route_data, is_active) VALUES (?, ?, ?, ?, 1)",
+                    [routeName, weekStart, driverId || 1, JSON.stringify(routeData)],
+                    function(err) {
+                        if (err) reject(err);
+                        else resolve(this.lastID);
+                    }
+                );
+            }
+        );
+    });
+}
+
+// ======================================================================
+// WEITERE API ROUTES
+// ======================================================================
+
+// Get saved routes
+app.get('/api/routes/saved', (req, res) => {
+    const { weekStart } = req.query;
+    
+    let query = "SELECT * FROM saved_routes ORDER BY created_at DESC";
+    let params = [];
+    
+    if (weekStart) {
+        query = "SELECT * FROM saved_routes WHERE week_start = ? ORDER BY created_at DESC";
+        params = [weekStart];
+    }
+    
+    db.all(query, params, (err, routes) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        // Parse route_data for each route
+        const parsedRoutes = routes.map(route => ({
+            ...route,
+            route_data: JSON.parse(route.route_data)
+        }));
+        
+        res.json(parsedRoutes);
+    });
+});
+
+// Load active route for a week
+app.get('/api/routes/active/:weekStart', (req, res) => {
+    const weekStart = req.params.weekStart;
+    
+    db.get(
+        "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
+        [weekStart],
+        (err, route) => {
+            if (err) {
+                res.status(500).json({ error: err.message });
+            } else if (!route) {
+                res.json({ found: false, message: 'Keine aktive Route für diese Woche' });
+            } else {
+                res.json({
+                    found: true,
+                    route: {
+                        ...route,
+                        route_data: JSON.parse(route.route_data)
+                    }
+                });
+            }
+        }
+    );
+});
+
+// CSV Preview with enhanced testimonial analysis
+app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: '',
+            encoding: 'utf-8',
+            dynamicTyping: false,
+            delimitersToGuess: [',', ';', '\t', '|']
+        });
+
+        console.log('📊 CSV Preview - Parsed meta:', parsed.meta);
+
+        const analysis = {
+            totalRows: parsed.data.length,
+            columns: parsed.meta.fields,
+            confirmedAppointments: 0,
+            proposalAppointments: 0,
+            onHoldAppointments: 0,
+            missingInvitee: 0,
+            sampleRows: []
+        };
+
+        parsed.data.forEach((row, index) => {
+            const inviteeName = row['Invitee Name'] || '';
+            const onHold = row['On Hold'] || '';
+            const startDateTime = row['Start Date & Time'] || '';
+
+            if (onHold && onHold.trim() !== '') {
+                analysis.onHoldAppointments++;
+            } else if (!inviteeName || inviteeName.trim() === '') {
+                analysis.missingInvitee++;
+            } else if (startDateTime && startDateTime.trim() !== '') {
+                analysis.confirmedAppointments++;
+            } else {
+                analysis.proposalAppointments++;
+            }
+
+            if (index < 5) {
+                analysis.sampleRows.push({
+                    invitee_name: inviteeName,
+                    company: row['Company'] || '',
+                    customer_company: row['Customer Company'] || '',
+                    has_appointment: !!(startDateTime && startDateTime.trim()),
+                    on_hold: !!(onHold && onHold.trim()),
+                    address: row['Adresse'] || `${row['Straße & Hausnr.'] || ''}, ${row['PLZ'] || ''} ${row['Ort'] || ''}`.trim(),
+                    start_date_time: startDateTime
+                });
+            }
+        });
+
+        res.json({
+            success: true,
+            analysis: analysis,
+            message: 'CSV Vorschau erstellt - Testimonial Person-fokussierte Struktur',
+            meta: {
+                delimiter: parsed.meta.delimiter,
+                fields_count: parsed.meta.fields.length,
+                truncated: parsed.meta.truncated,
+                error: parsed.errors.length > 0 ? parsed.errors[0] : null
+            },
+            data_structure: {
+                primary_name: 'Invitee Name (Person für Testimonial)',
+                company_info: 'Company (Firma der Person)',
+                client_info: 'Customer Company (Unser Kunde)',
+                valid_appointments: analysis.confirmedAppointments + analysis.proposalAppointments
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ CSV Preview Fehler:', error);
+        res.status(500).json({
+            error: 'CSV Analyse fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// CSV Import endpoint for testimonial data
+app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    console.log('📁 CSV Testimonial Import gestartet...');
+    
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: '',
+            encoding: 'utf-8',
+            dynamicTyping: false,
+            delimitersToGuess: [',', ';', '\t', '|']
+        });
+
+        console.log(`📊 ${parsed.data.length} Zeilen gefunden`);
+
+        const processedAppointments = [];
+        let skippedCount = 0;
+        let confirmedCount = 0;
+        let proposalCount = 0;
+
+        parsed.data.forEach((row, index) => {
+            // Skip if "On Hold" is filled
+            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                skippedCount++;
+                return;
+            }
+
+            // Skip if essential data missing
+            if (!row['Invitee Name'] || row['Invitee Name'].trim() === '') {
+                skippedCount++;
+                return;
+            }
+
+            // Build address
+            let fullAddress = row['Adresse'] || '';
+            if (!fullAddress && row['Straße & Hausnr.']) {
+                const parts = [];
+                if (row['Straße & Hausnr.']) parts.push(row['Straße & Hausnr.']);
+                if (row['PLZ'] && row['Ort']) parts.push(`${row['PLZ']} ${row['Ort']}`);
+                else if (row['Ort']) parts.push(row['Ort']);
+                if (row['Land']) parts.push(row['Land']);
+                fullAddress = parts.join(', ');
+            }
+
+            // Parse date and time for fixed appointments
+            let isFixed = false;
+            let fixedDate = null;
+            let fixedTime = null;
+            
+            if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
+                try {
+                    const dateTimeStr = row['Start Date & Time'].trim();
+                    let dateTime;
+                    
+                    if (dateTimeStr.match(/\d{1,2}[\.\/]\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}/)) {
+                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+                        const [day, month, year] = datePart.split(/[\.\/]/);
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                    } else if (dateTimeStr.match(/\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                        dateTime = new Date(dateTimeStr);
+                    } else {
+                        dateTime = new Date(dateTimeStr);
+                    }
+                    
+                    if (!isNaN(dateTime.getTime())) {
+                        isFixed = true;
+                        fixedDate = dateTime.toISOString().split('T')[0];
+                        fixedTime = `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`;
+                    }
+                } catch (e) {
+                    console.log(`❌ Date parsing failed for: ${row['Start Date & Time']}`);
+                }
+            }
+
+            const status = isFixed ? 'bestätigt' : 'vorschlag';
+            
+            if (status === 'bestätigt') confirmedCount++;
+            else proposalCount++;
+
+            const inviteeName = row['Invitee Name'].trim();
+            const company = row['Company'] ? row['Company'].trim() : '';
+            const customerCompany = row['Customer Company'] ? row['Customer Company'].trim() : '';
+
+            let priority = 'mittel';
+            if (status === 'bestätigt') {
+                priority = 'hoch';
+            } else if (customerCompany.toLowerCase().includes('bmw') || 
+                      customerCompany.toLowerCase().includes('mercedes') || 
+                      customerCompany.toLowerCase().includes('audi') || 
+                      customerCompany.toLowerCase().includes('porsche') || 
+                      customerCompany.toLowerCase().includes('volkswagen')) {
+                priority = 'hoch';
+            }
+
+            const duration = 3;
+
+            const appointment = {
+                customer: inviteeName,
+                address: fullAddress || 'Adresse nicht verfügbar',
+                priority: priority,
+                status: status,
+                duration: duration,
+                pipeline_days: status === 'vorschlag' ? Math.floor(Math.random() * 30) + 1 : 7,
+                is_fixed: isFixed ? 1 : 0,
+                fixed_date: fixedDate,
+                fixed_time: fixedTime,
+                on_hold: row['On Hold'] || null,
+                notes: JSON.stringify({
+                    invitee_name: inviteeName,
+                    company: company,
+                    customer_company: customerCompany,
+                    start_time: row['Start Date & Time'] || null,
+                    end_time: row['End Date & Time'] || null,
+                    custom_notes: row['Notiz'] || '',
+                    import_date: new Date().toISOString(),
+                    source: 'CSV Testimonial Import'
+                })
+            };
+
+            processedAppointments.push(appointment);
+        });
+
+        console.log(`📈 Processing complete: ${processedAppointments.length} testimonial appointments, ${skippedCount} skipped`);
+
+        // Clear existing appointments and insert new ones
+        db.run("DELETE FROM appointments", (err) => {
+            if (err) {
+                return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
+            }
+
+            console.log('🧹 Cleared existing appointments');
+
+            const stmt = db.prepare(`INSERT INTO appointments 
+                (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates, is_fixed, fixed_date, fixed_time, on_hold) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+            let insertedCount = 0;
+            let errors = [];
+
+            processedAppointments.forEach((apt) => {
+                stmt.run([
+                    apt.customer, 
+                    apt.address, 
+                    apt.priority, 
+                    apt.status, 
+                    apt.duration, 
+                    apt.pipeline_days, 
+                    apt.notes,
+                    JSON.stringify([]), 
+                    JSON.stringify([]),
+                    apt.is_fixed,
+                    apt.fixed_date,
+                    apt.fixed_time,
+                    apt.on_hold
+                ], (err) => {
+                    if (err) {
+                        errors.push(`${apt.customer}: ${err.message}`);
+                    } else {
+                        insertedCount++;
+                    }
+                    
+                    // Send response when all insertions are complete
+                    if (insertedCount + errors.length === processedAppointments.length) {
+                        stmt.finalize();
+                        
+                        res.json({
+                            success: true,
+                            message: 'CSV Testimonial Import erfolgreich abgeschlossen',
+                            stats: {
+                                totalRows: parsed.data.length,
+                                processed: processedAppointments.length,
+                                inserted: insertedCount,
+                                confirmed: confirmedCount,
+                                proposals: proposalCount,
+                                skipped: skippedCount,
+                                errors: errors.length
+                            },
+                            debug: {
+                                delimiter: parsed.meta.delimiter,
+                                columns: parsed.meta.fields,
+                                sample_processed: processedAppointments.slice(0, 2)
+                            },
+                            sample_data: processedAppointments.slice(0, 3).map(apt => ({
+                                name: apt.customer,
+                                is_fixed: apt.is_fixed,
+                                fixed_date: apt.fixed_date,
+                                fixed_time: apt.fixed_time,
+                                notes_preview: JSON.parse(apt.notes)
+                            })),
+                            errors: errors.length > 0 ? errors.slice(0, 5) : undefined
+                        });
+                    }
+                });
+            });
+
+            // Handle case where no appointments to process
+            if (processedAppointments.length === 0) {
+                stmt.finalize();
+                res.json({
+                    success: false,
+                    message: 'Keine gültigen Testimonial-Termine in der CSV gefunden',
+                    stats: {
+                        totalRows: parsed.data.length,
+                        skipped: skippedCount
+                    }
+                });
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ CSV Testimonial Import Fehler:', error);
+        res.status(500).json({
+            error: 'CSV Testimonial Import fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// Admin endpoint to check database
+app.get('/api/admin/status', (req, res) => {
+    db.get("SELECT COUNT(*) as count FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')", (err, row) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        db.get("SELECT COUNT(*) as on_hold_count FROM appointments WHERE on_hold IS NOT NULL AND on_hold != ''", (err2, row2) => {
+            if (err2) {
+                res.status(500).json({ error: err2.message });
+                return;
+            }
+            
+            db.get("SELECT COUNT(*) as fixed_count FROM appointments WHERE is_fixed = 1", (err3, row3) => {
+                if (err3) {
+                    res.status(500).json({ error: err3.message });
+                    return;
+                }
+                
+                db.get("SELECT COUNT(*) as driver_count FROM drivers", (err4, row4) => {
+                    if (err4) {
+                        res.status(500).json({ error: err4.message });
+                        return;
+                    }
+                    
+                    res.json({
+                        database: 'connected',
+                        appointments_count: row.count,
+                        on_hold_count: row2.on_hold_count,
+                        fixed_appointments_count: row3.fixed_count,
+                        drivers_count: row4.driver_count,
+                        database_path: dbPath,
+                        type: 'max_efficiency_testimonial_planner',
+                        features: ['fixed_appointments', 'on_hold_filter', 'max_appointments_per_week'],
+                        google_maps_api: process.env.GOOGLE_MAPS_API_KEY ? 'configured' : 'fallback'
+                    });
+                });
+            });
+        });
+    });
+});
+
+// Admin endpoint to ensure driver exists
+app.post('/api/admin/ensure-driver', (req, res) => {
+    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
+            VALUES (1, 'Testimonial-Fahrer', 'Kurt-Schumacher-Straße 34, 30159 Hannover')`, function(err) {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        
+        // Prüfe ob Fahrer jetzt existiert
+        db.get("SELECT * FROM drivers WHERE id = 1", (err2, driver) => {
+            if (err2) {
+                res.status(500).json({ error: err2.message });
+                return;
+            }
+            
+            res.json({
+                success: true,
+                message: 'Fahrer sichergestellt',
+                driver: driver,
+                was_inserted: this.changes > 0
+            });
+        });
+    });
+});
