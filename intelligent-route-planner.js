@@ -1,8 +1,3 @@
-// ======================================================================
-// INTELLIGENTE ROUTENPLANUNG FÜR TESTIMONIALS.DE
-// Datei: intelligent-route-planner.js
-// ======================================================================
-
 const axios = require('axios');
 const EnhancedGeocodingService = require('./geocoding-service');
 
