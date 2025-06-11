@@ -20,6 +20,7 @@ class IntelligentRoutePlanner {
             travelSpeedKmh: 80, // Durchschnittliche Reisegeschwindigkeit
             maxTravelTimePerDay: 4 // Max 4h Fahrt pro Tag
         };
+        this.distanceMatrixApiDisabled = false;
     }
 
     // ======================================================================
@@ -227,10 +228,14 @@ class IntelligentRoutePlanner {
     // ======================================================================
     async calculateTravelMatrix(appointments) {
         console.log('🚗 Berechne Reisematrix mit Google Distance Matrix API...');
-        
+
         const matrix = {};
         const apiKey = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
-        
+
+        if (!apiKey) {
+            this.distanceMatrixApiDisabled = true;
+        }
+
         // Alle Punkte (inkl. Home Base)
         const allPoints = [
             { id: 'home', ...this.constraints.homeBase },
@@ -246,10 +251,22 @@ class IntelligentRoutePlanner {
             for (let j = 0; j < allPoints.length; j += batchSize) {
                 const destinationBatch = allPoints.slice(j, j + batchSize);
                 
+                if (this.distanceMatrixApiDisabled) {
+                    this.calculateFallbackDistances(originBatch, destinationBatch, matrix);
+                    continue;
+                }
+
                 try {
                     await this.calculateDistanceMatrixBatch(originBatch, destinationBatch, matrix, apiKey);
                 } catch (error) {
                     console.warn('Distance Matrix Batch fehlgeschlagen, verwende Fallback:', error.message);
+
+                    if (error.message.includes('REQUEST_DENIED') ||
+                        error.message.includes('API key') ||
+                        error.message.includes('invalid')) {
+                        this.distanceMatrixApiDisabled = true;
+                    }
+
                     // Fallback für diese Batch
                     this.calculateFallbackDistances(originBatch, destinationBatch, matrix);
                 }
@@ -299,6 +316,9 @@ class IntelligentRoutePlanner {
                 }
             }
         } else {
+            if (response.data.status === 'REQUEST_DENIED') {
+                this.distanceMatrixApiDisabled = true;
+            }
             throw new Error(`Distance Matrix API Status: ${response.data.status}`);
         }
     }
