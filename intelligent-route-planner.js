@@ -221,56 +221,132 @@ class IntelligentRoutePlanner {
     // ======================================================================
     // REISEMATRIX MIT GOOGLE DISTANCE MATRIX API
     // ======================================================================
-    async calculateTravelMatrix(appointments) {
-        console.log('🚗 Berechne Reisematrix mit Google Distance Matrix API...');
+// ======================================================================
+// FIX 1: DISTANCE MATRIX API BATCHING PROBLEM
+// Datei: intelligent-route-planner.js
+// ======================================================================
 
-        const matrix = {};
-        const apiKey = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
+// ERSETZEN Sie die calculateTravelMatrix Funktion mit dieser korrigierten Version:
 
-        if (!apiKey) {
-            this.distanceMatrixApiDisabled = true;
-        }
+async calculateTravelMatrix(appointments) {
+    console.log('🚗 Berechne Reisematrix mit Google Distance Matrix API...');
 
-        // Alle Punkte (inkl. Home Base)
-        const allPoints = [
-            { id: 'home', ...this.constraints.homeBase },
-            ...appointments.map(apt => ({ id: apt.id, lat: apt.lat, lng: apt.lng }))
-        ];
+    const matrix = {};
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
 
-        // Distance Matrix API kann bis zu 25 Origins und 25 Destinations handhaben
-        const batchSize = 25;
+    if (!apiKey) {
+        this.distanceMatrixApiDisabled = true;
+    }
+
+    // Alle Punkte (inkl. Home Base)
+    const allPoints = [
+        { id: 'home', ...this.constraints.homeBase },
+        ...appointments.map(apt => ({ id: apt.id, lat: apt.lat, lng: apt.lng }))
+    ];
+
+    console.log(`📊 Berechne Matrix für ${allPoints.length} Punkte`);
+
+    // KORREKTUR: Kleinere Batch-Größe für Distance Matrix API
+    // Google Distance Matrix API Limit: 25x25 = 625 Elemente pro Request
+    // Bei 25+ Punkten überschreiten wir das Limit
+    const maxBatchSize = Math.min(10, allPoints.length); // Maximal 10x10 = 100 Elemente
+    
+    for (let i = 0; i < allPoints.length; i += maxBatchSize) {
+        const originBatch = allPoints.slice(i, i + maxBatchSize);
         
-        for (let i = 0; i < allPoints.length; i += batchSize) {
-            const originBatch = allPoints.slice(i, i + batchSize);
+        for (let j = 0; j < allPoints.length; j += maxBatchSize) {
+            const destinationBatch = allPoints.slice(j, j + maxBatchSize);
             
-            for (let j = 0; j < allPoints.length; j += batchSize) {
-                const destinationBatch = allPoints.slice(j, j + batchSize);
+            console.log(`🔄 Batch: ${originBatch.length} Origins × ${destinationBatch.length} Destinations = ${originBatch.length * destinationBatch.length} Elemente`);
+            
+            if (this.distanceMatrixApiDisabled) {
+                this.calculateFallbackDistances(originBatch, destinationBatch, matrix);
+                continue;
+            }
+
+            try {
+                await this.calculateDistanceMatrixBatch(originBatch, destinationBatch, matrix, apiKey);
                 
-                if (this.distanceMatrixApiDisabled) {
-                    this.calculateFallbackDistances(originBatch, destinationBatch, matrix);
-                    continue;
+                // Pause zwischen API-Calls um Rate Limiting zu vermeiden
+                await new Promise(resolve => setTimeout(resolve, 200));
+                
+            } catch (error) {
+                console.warn('Distance Matrix Batch fehlgeschlagen, verwende Fallback:', error.message);
+
+                if (error.message.includes('REQUEST_DENIED') ||
+                    error.message.includes('API key') ||
+                    error.message.includes('invalid')) {
+                    this.distanceMatrixApiDisabled = true;
                 }
 
-                try {
-                    await this.calculateDistanceMatrixBatch(originBatch, destinationBatch, matrix, apiKey);
-                } catch (error) {
-                    console.warn('Distance Matrix Batch fehlgeschlagen, verwende Fallback:', error.message);
+                // Fallback für diese Batch
+                this.calculateFallbackDistances(originBatch, destinationBatch, matrix);
+            }
+        }
+    }
 
-                    if (error.message.includes('REQUEST_DENIED') ||
-                        error.message.includes('API key') ||
-                        error.message.includes('invalid')) {
-                        this.distanceMatrixApiDisabled = true;
-                    }
+    console.log(`✅ Travel Matrix erstellt für ${Object.keys(matrix).length} Punkte`);
+    return matrix;
+}
 
-                    // Fallback für diese Batch
-                    this.calculateFallbackDistances(originBatch, destinationBatch, matrix);
+// ERSETZEN Sie auch die calculateDistanceMatrixBatch Funktion:
+
+async calculateDistanceMatrixBatch(origins, destinations, matrix, apiKey) {
+    const originsStr = origins.map(p => `${p.lat},${p.lng}`).join('|');
+    const destinationsStr = destinations.map(p => `${p.lat},${p.lng}`).join('|');
+    
+    console.log(`🌐 Distance Matrix API Call: ${origins.length}×${destinations.length} = ${origins.length * destinations.length} Elemente`);
+    
+    // KORREKTUR: Überprüfung der Element-Anzahl VOR dem API-Call
+    const totalElements = origins.length * destinations.length;
+    if (totalElements > 625) {
+        throw new Error(`Zu viele Elemente für Distance Matrix API: ${totalElements} (Max: 625)`);
+    }
+    
+    const response = await axios.get(`https://maps.googleapis.com/maps/api/distancematrix/json`, {
+        params: {
+            origins: originsStr,
+            destinations: destinationsStr,
+            key: apiKey,
+            units: 'metric',
+            mode: 'driving',
+            avoid: 'tolls',
+            language: 'de',
+            region: 'de'
+        },
+        timeout: 15000 // Längerer Timeout für größere Batches
+    });
+
+    if (response.data.status === 'OK') {
+        console.log(`✅ Distance Matrix API erfolgreich: ${response.data.rows.length} Zeilen erhalten`);
+        
+        for (let i = 0; i < origins.length; i++) {
+            const origin = origins[i];
+            if (!matrix[origin.id]) matrix[origin.id] = {};
+            
+            for (let j = 0; j < destinations.length; j++) {
+                const destination = destinations[j];
+                const element = response.data.rows[i].elements[j];
+                
+                if (element.status === 'OK') {
+                    matrix[origin.id][destination.id] = {
+                        distance: element.distance.value / 1000, // km
+                        duration: element.duration.value / 3600  // Stunden
+                    };
+                } else {
+                    console.warn(`❌ Element ${origin.id} → ${destination.id}: ${element.status}`);
+                    // Fallback für dieses spezifische Paar
+                    matrix[origin.id][destination.id] = this.calculateFallbackDistance(origin, destination);
                 }
             }
         }
-
-        return matrix;
+    } else {
+        if (response.data.status === 'REQUEST_DENIED') {
+            this.distanceMatrixApiDisabled = true;
+        }
+        throw new Error(`Distance Matrix API Status: ${response.data.status} - ${response.data.error_message || 'Unbekannter Fehler'}`);
     }
-
+}
     // ======================================================================
     // DISTANCE MATRIX BATCH VERARBEITUNG
     // ======================================================================
