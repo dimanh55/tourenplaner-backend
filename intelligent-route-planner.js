@@ -5,15 +5,18 @@ class IntelligentRoutePlanner {
 constructor() {
     this.geocodingService = new EnhancedGeocodingService();
     this.constraints = {
-        maxWorkHoursPerWeek: 45,        // ERHÖHT: von 40 auf 45h
-        maxWorkHoursPerDay: 10,         // ERHÖHT: von 8 auf 10h  
-        flexWorkHoursPerDay: 12,        // ERHÖHT: von 10 auf 12h für Ausnahmen
-        workStartTime: 7,               // FRÜHER: von 8 auf 7 Uhr
-        workEndTime: 19,                // SPÄTER: von 17 auf 19 Uhr
-        appointmentDuration: 3,         // Bleibt: 3h pro Dreh
+        maxWorkHoursPerWeek: 50,        // Realistische 50h für Testimonials
+        maxWorkHoursPerDay: 14,         // Lange Tage möglich (6:00-20:00)
+        flexWorkHoursPerDay: 16,        // Extremfall: 16h (5:00-21:00)
+        workStartTime: 6,               // Früh starten für lange Fahrten
+        workEndTime: 20,                // Spät enden, aber zurück im Hotel
+        appointmentDuration: 3,         // 3h pro Dreh
         homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
-        travelSpeedKmh: 90,             // ERHÖHT: von 80 auf 90 km/h
-        maxTravelTimePerDay: 5          // ERHÖHT: von 4 auf 5h Fahrt pro Tag
+        travelSpeedKmh: 85,             // Realistisch mit Pausen
+        maxTravelTimePerDay: 8,         // Bis zu 8h Fahrt pro Tag OK
+        maxSingleTravelTime: 5,         // Einzelfahrt bis 5h (400km)
+        overnightThreshold: 200,        // Übernachtung ab 200km vom Heimatort
+        minOvernightDistance: 150       // Mindestens 150km für Übernachtung
     };
     this.distanceMatrixApiDisabled = false;
 }
@@ -431,272 +434,269 @@ async calculateDistanceMatrixBatch(origins, destinations, matrix, apiKey) {
         return R * c;
     }
 
-    // ======================================================================
-    // OPTIMALE WOCHENPLANUNG
-    // ======================================================================
-    async planOptimalWeek(appointments, travelMatrix, weekStart) {
-        console.log('🎯 Plane optimale Woche...');
-        
-        // 1. Bestätigte Termine priorisieren
-        const confirmedAppointments = appointments.filter(apt => apt.isConfirmed);
-        const proposalAppointments = appointments.filter(apt => apt.isProposal);
-        
-        // 2. Nach Priorität sortieren
-        const sortedConfirmed = confirmedAppointments.sort((a, b) => b.priority - a.priority);
-        const sortedProposals = proposalAppointments.sort((a, b) => b.priority - a.priority);
-        
-        // 3. Woche initialisieren
-        const week = this.initializeWeek(weekStart);
-        
-        // 4. Bestätigte Termine zuerst einplanen
-        await this.scheduleAppointments(week, sortedConfirmed, travelMatrix, true);
-        
-        // 5. Vorschläge einplanen (falls Platz)
-        await this.scheduleAppointments(week, sortedProposals, travelMatrix, false);
-        
-        return week;
-    }
+// NEUE FUNKTION: Realistische Planungslogik
+async planOptimalWeek(appointments, travelMatrix, weekStart) {
+    console.log('🚗 Starte REALISTISCHE Testimonial-Planung...');
+    console.log(`📊 Akzeptiere Fahrten bis ${this.constraints.maxSingleTravelTime}h (ca. 400km)`);
+    
+    // 1. Termine nach Machbarkeit sortieren
+    const confirmedAppointments = appointments.filter(apt => apt.isConfirmed);
+    const proposalAppointments = appointments.filter(apt => apt.isProposal);
+    
+    console.log(`📅 ${confirmedAppointments.length} bestätigte + ${proposalAppointments.length} Vorschlag-Termine`);
+    
+    // 2. Woche initialisieren
+    const week = this.initializeWeek(weekStart);
+    
+    // 3. ZUERST: Bestätigte Termine einplanen (haben Priorität)
+    await this.scheduleConfirmedAppointments(week, confirmedAppointments, travelMatrix);
+    
+    // 4. DANN: Vorschläge wo noch Platz ist
+    await this.scheduleProposalAppointments(week, proposalAppointments, travelMatrix);
+    
+    // 5. Übernachtungen optimieren
+    this.planOvernightStops(week, travelMatrix);
+    
+    return week;
+}
 
-    // ======================================================================
-    // WOCHE INITIALISIEREN
-    // ======================================================================
-    initializeWeek(weekStart) {
-        const weekDays = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
-        const startDate = new Date(weekStart);
+// NEUE FUNKTION: Bestätigte Termine haben absolute Priorität
+async scheduleConfirmedAppointments(week, confirmedAppointments, travelMatrix) {
+    console.log('📌 Plane bestätigte Termine (absolute Priorität)...');
+    
+    const sortedConfirmed = confirmedAppointments.sort((a, b) => {
+        // Nach Pipeline-Alter sortieren (ältere zuerst)
+        return b.pipeline_days - a.pipeline_days;
+    });
+    
+    for (const appointment of sortedConfirmed) {
+        const bestSlot = this.findBestSlotAnywhere(week, appointment, travelMatrix, true);
         
-        return weekDays.map((day, index) => {
-            const date = new Date(startDate);
-            date.setDate(startDate.getDate() + index);
-            
-            return {
-                day,
-                date: date.toISOString().split('T')[0],
-                appointments: [],
-                workTime: 0,
-                travelTime: 0,
-                currentLocation: 'home', // Startet zu Hause
-                lastAppointmentEnd: this.constraints.workStartTime,
-                overtime: false
-            };
-        });
-    }
-
-    // ======================================================================
-    // TERMINE EINPLANEN
-    // ======================================================================
-    async scheduleAppointments(week, appointments, travelMatrix, isConfirmed) {
-        for (const appointment of appointments) {
-            const bestSlot = this.findBestTimeSlot(week, appointment, travelMatrix);
-            
-            if (bestSlot) {
-                this.assignAppointmentToSlot(week[bestSlot.dayIndex], appointment, bestSlot, travelMatrix);
-                console.log(`📅 ${isConfirmed ? 'Bestätigt' : 'Vorschlag'}: ${appointment.invitee_name} → ${bestSlot.day} ${bestSlot.time}`);
-            } else {
-                console.warn(`⚠️ Kein Slot gefunden für: ${appointment.invitee_name}`);
+        if (bestSlot) {
+            this.assignAppointmentToSlot(week[bestSlot.dayIndex], appointment, bestSlot, travelMatrix);
+            console.log(`✅ BESTÄTIGT: ${appointment.invitee_name || appointment.customer} → ${bestSlot.day} ${bestSlot.time}`);
+        } else {
+            console.log(`❌ PROBLEM: Bestätigter Termin passt nirgends: ${appointment.invitee_name || appointment.customer}`);
+            // Für bestätigte Termine: Notfall-Planung versuchen
+            const emergencySlot = this.forceScheduleAppointment(week, appointment, travelMatrix);
+            if (emergencySlot) {
+                console.log(`🚨 NOTFALL: ${appointment.invitee_name || appointment.customer} → ${emergencySlot.day} ${emergencySlot.time} (Überstunden)`);
             }
         }
     }
+}
 
-    // ======================================================================
-    // BESTEN ZEITSLOT FINDEN
-    // ======================================================================
-findBestTimeSlot(week, appointment, travelMatrix) {
+// NEUE FUNKTION: Vorschläge wo noch Platz ist
+async scheduleProposalAppointments(week, proposalAppointments, travelMatrix) {
+    console.log('💡 Plane Vorschlag-Termine (wenn Platz vorhanden)...');
+    
+    const sortedProposals = proposalAppointments.sort((a, b) => {
+        // Nach Priorität und Pipeline-Alter
+        if (a.priority !== b.priority) return b.priority - a.priority;
+        return b.pipeline_days - a.pipeline_days;
+    });
+    
+    let scheduledCount = 0;
+    
+    for (const appointment of sortedProposals) {
+        const bestSlot = this.findBestSlotAnywhere(week, appointment, travelMatrix, false);
+        
+        if (bestSlot) {
+            this.assignAppointmentToSlot(week[bestSlot.dayIndex], appointment, bestSlot, travelMatrix);
+            console.log(`💡 VORSCHLAG: ${appointment.invitee_name || appointment.customer} → ${bestSlot.day} ${bestSlot.time}`);
+            scheduledCount++;
+        } else {
+            console.log(`⏳ Kein Platz: ${appointment.invitee_name || appointment.customer} (Fahrt: ${this.estimateTravelTime(appointment, travelMatrix)}h)`);
+        }
+    }
+    
+    console.log(`✅ ${scheduledCount} von ${sortedProposals.length} Vorschlägen eingeplant`);
+}
+
+// NEUE FUNKTION: Flexiblere Slot-Suche
+findBestSlotAnywhere(week, appointment, travelMatrix, isConfirmed) {
     let bestSlot = null;
     let bestScore = -1;
-
+    
     for (let dayIndex = 0; dayIndex < week.length; dayIndex++) {
         const day = week[dayIndex];
         
-        // LOCKERE Arbeitszeit-Constraints
+        // Unterschiedliche Limits je nach Termintyp
+        const maxHours = isConfirmed ? this.constraints.flexWorkHoursPerDay : this.constraints.maxWorkHoursPerDay;
         const potentialWorkTime = day.workTime + this.constraints.appointmentDuration;
         
-        // Unterschiedliche Limits je nach Termintyp
-        let maxAllowed;
-        if (appointment.isConfirmed) {
-            maxAllowed = this.constraints.flexWorkHoursPerDay; // 12h für bestätigte Termine
-        } else if (appointment.priority > 80) {
-            maxAllowed = this.constraints.maxWorkHoursPerDay + 1; // 11h für hohe Priorität
-        } else {
-            maxAllowed = this.constraints.maxWorkHoursPerDay; // 10h für normale Termine
+        if (potentialWorkTime > maxHours) {
+            continue; // Tag wirklich voll
         }
         
-        if (potentialWorkTime > maxAllowed) {
-            console.log(`⏰ Tag ${dayIndex + 1} voll: ${potentialWorkTime}h würde ${maxAllowed}h überschreiten`);
-            continue;
-        }
-
-        // Reisezeit vom aktuellen Standort berechnen
+        // Reisezeit berechnen
         const travelFromCurrent = travelMatrix[day.currentLocation]?.[appointment.id];
         if (!travelFromCurrent) {
             console.log(`❌ Keine Reisedaten von ${day.currentLocation} zu ${appointment.id}`);
             continue;
         }
-
-        // FLEXIBLERE Zeitberechnung
-        let earliestStart = day.lastAppointmentEnd + travelFromCurrent.duration;
         
-        // Mindestens 30min Pause zwischen Terminen
-        if (day.appointments.length > 0) {
-            earliestStart = Math.max(earliestStart, day.lastAppointmentEnd + 0.5);
+        // Realistischere Zeitberechnung
+        let startTime = day.lastAppointmentEnd + travelFromCurrent.duration;
+        
+        // Mindestpause nur bei langen Fahrten
+        if (travelFromCurrent.duration > 2) {
+            startTime += 0.5; // 30min Pause bei >2h Fahrt
         }
         
-        // Nicht vor Arbeitsbeginn
-        earliestStart = Math.max(earliestStart, this.constraints.workStartTime);
+        // Früh anfangen ist OK
+        startTime = Math.max(startTime, this.constraints.workStartTime);
         
-        // Termin muss vor Arbeitsende starten
-        if (earliestStart > this.constraints.workEndTime - this.constraints.appointmentDuration) {
-            console.log(`⏰ Tag ${dayIndex + 1}: Termin würde zu spät starten (${this.formatTime(earliestStart)})`);
+        const appointmentEnd = startTime + this.constraints.appointmentDuration;
+        
+        // Prüfe ob zu spät
+        if (appointmentEnd > this.constraints.workEndTime) {
+            console.log(`⏰ Tag ${dayIndex + 1}: Zu spät (${this.formatTime(appointmentEnd)})`);
             continue;
         }
         
-        const appointmentEnd = earliestStart + this.constraints.appointmentDuration;
-        
-        // FLEXIBLERE Rückreise-Prüfung
-        const returnHome = travelMatrix[appointment.id]?.['home'];
-        if (returnHome) {
-            const totalEndTime = appointmentEnd + returnHome.duration;
-            // Erlaubt bis zu 2h Überstunden für Rückreise
-            if (totalEndTime > this.constraints.workEndTime + 2) {
-                console.log(`🏠 Tag ${dayIndex + 1}: Rückreise zu spät (${this.formatTime(totalEndTime)})`);
-                continue;
-            }
+        // WICHTIG: Prüfe realistische Rückreise oder Übernachtung
+        const canReturn = this.canReturnHomeOrStayOvernight(appointment, appointmentEnd, travelMatrix, dayIndex, week);
+        if (!canReturn && !isConfirmed) {
+            console.log(`🏨 Tag ${dayIndex + 1}: Rückreise/Übernachtung problematisch`);
+            continue;
         }
-
-        // VERBESSERTE Score-Berechnung
-        const score = this.calculateSlotScore(day, appointment, travelFromCurrent, dayIndex, earliestStart);
         
-        console.log(`📊 Tag ${dayIndex + 1}: Score ${score.toFixed(1)} für ${appointment.invitee_name || appointment.customer} um ${this.formatTime(earliestStart)}`);
+        // Score berechnen
+        const score = this.calculateRealisticScore(day, appointment, travelFromCurrent, dayIndex, isConfirmed);
         
         if (score > bestScore) {
             bestScore = score;
             bestSlot = {
                 dayIndex,
                 day: day.day,
-                time: this.formatTime(earliestStart),
-                startTime: earliestStart,
+                time: this.formatTime(startTime),
+                startTime: startTime,
                 travelTime: travelFromCurrent.duration,
                 score
             };
         }
     }
-
-    if (bestSlot) {
-        console.log(`✅ Bester Slot: ${bestSlot.day} ${bestSlot.time} (Score: ${bestSlot.score.toFixed(1)})`);
-    } else {
-        console.log(`❌ Kein Slot gefunden für ${appointment.invitee_name || appointment.customer}`);
-    }
-
+    
     return bestSlot;
 }
 
-// NEUE VERBESSERTE calculateSlotScore Funktion:
-
-calculateSlotScore(day, appointment, travelData, dayIndex, startTime) {
-    let score = 100; // Basis-Score
-
-    // Weniger Reisezeit = besser (aber weniger gewichtet)
-    score -= travelData.duration * 5; // Reduziert von 10 auf 5
+// NEUE FUNKTION: Kann nach Hause oder Übernachtung?
+canReturnHomeOrStayOvernight(appointment, appointmentEnd, travelMatrix, dayIndex, week) {
+    const returnHome = travelMatrix[appointment.id]?.['home'];
+    if (!returnHome) return true; // Fallback: erlauben
     
-    // Bestätigte Termine haben höchste Priorität
-    if (appointment.isConfirmed) score += 50; // Erhöht von 30 auf 50
-    
-    // Hohe Priorität bevorzugen
-    if (appointment.priority > 80) score += 25;
-    else if (appointment.priority > 60) score += 10;
-    
-    // Pipeline-Alter berücksichtigen (ältere Termine bevorzugen)
-    score += Math.min(appointment.pipeline_age * 0.5, 15);
-    
-    // Frühere Wochentage bevorzugen (aber weniger stark)
-    score -= dayIndex * 2; // Reduziert von 3 auf 2
-    
-    // Tag nicht zu voll machen (aber lockerer)
-    if (day.workTime > 8) score -= 10; // Reduziert Penalty
-    if (day.workTime > 10) score -= 15; // Erst bei 10h+ starke Penalty
-    
-    // Optimale Tageszeiten bevorzugen
-    if (startTime >= 9 && startTime <= 15) {
-        score += 15; // Bonus für 9-15 Uhr
-    } else if (startTime >= 7 && startTime <= 17) {
-        score += 5; // Kleiner Bonus für 7-17 Uhr
+    // Option 1: Noch am gleichen Tag nach Hause
+    const returnTime = appointmentEnd + returnHome.duration;
+    if (returnTime <= this.constraints.workEndTime + 2) { // 2h Überstunden OK
+        return true;
     }
     
-    // VIP-Kunden extra bevorzugen
-    if (appointment.priority > 90) score += 30;
+    // Option 2: Übernachtung möglich?
+    if (returnHome.distance >= this.constraints.minOvernightDistance) {
+        console.log(`🏨 Übernachtung geplant: ${returnHome.distance.toFixed(0)}km von zu Hause`);
+        return true;
+    }
     
-    // Weniger Termine am Tag = höherer Score
-    score += (5 - day.appointments.length) * 5;
+    // Option 3: Morgen weiter reisen?
+    if (dayIndex < week.length - 1) {
+        return true; // Kann am nächsten Tag weiter reisen
+    }
+    
+    return false;
+}
 
+// NEUE FUNKTION: Realistischer Score
+calculateRealisticScore(day, appointment, travelData, dayIndex, isConfirmed) {
+    let score = 100;
+    
+    // Bestätigte Termine haben massiven Bonus
+    if (isConfirmed) score += 100;
+    
+    // Priorität stark gewichten
+    score += appointment.priority;
+    
+    // Pipeline-Alter berücksichtigen
+    score += Math.min(appointment.pipeline_days * 0.8, 25);
+    
+    // Reisezeit: Akzeptiere lange Fahrten, aber bevorzuge kürzere
+    if (travelData.duration <= 2) score += 20;      // Bis 2h: Bonus
+    else if (travelData.duration <= 4) score += 5;  // Bis 4h: Kleiner Bonus
+    else score -= 10;                                // Über 4h: Kleine Penalty
+    
+    // Frühere Tage leicht bevorzugen
+    score -= dayIndex * 3;
+    
+    // Tag nicht überfüllen
+    if (day.workTime > 10) score -= 15;
+    if (day.workTime > 12) score -= 25;
+    
     return Math.max(0, score);
 }
 
-// VERBESSERTE formatTime Funktion (fixt das 12:60 Problem):
-
-formatTime(hours) {
-    const h = Math.floor(hours);
-    const m = Math.round((hours - h) * 60);
+// NEUE FUNKTION: Notfall-Planung für bestätigte Termine
+forceScheduleAppointment(week, appointment, travelMatrix) {
+    console.log(`🚨 Notfall-Planung für: ${appointment.invitee_name || appointment.customer}`);
     
-    // FIX: Behandle 60 Minuten korrekt
-    if (m >= 60) {
-        return `${(h + 1).toString().padStart(2, '0')}:00`;
+    // Finde Tag mit wenigsten Stunden
+    let bestDay = 0;
+    let minHours = week[0].workTime;
+    
+    for (let i = 1; i < week.length; i++) {
+        if (week[i].workTime < minHours) {
+            minHours = week[i].workTime;
+            bestDay = i;
+        }
     }
     
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    const day = week[bestDay];
+    const travelFromCurrent = travelMatrix[day.currentLocation]?.[appointment.id];
+    
+    if (!travelFromCurrent) return null;
+    
+    // Einfach einplanen, egal ob Überstunden
+    let startTime = day.lastAppointmentEnd + travelFromCurrent.duration + 0.5;
+    startTime = Math.max(startTime, this.constraints.workStartTime);
+    
+    return {
+        dayIndex: bestDay,
+        day: day.day,
+        time: this.formatTime(startTime),
+        startTime: startTime,
+        travelTime: travelFromCurrent.duration,
+        score: 0
+    };
 }
 
-    // ======================================================================
-    // TERMIN ZU SLOT ZUWEISEN
-    // ======================================================================
-    assignAppointmentToSlot(day, appointment, slot, travelMatrix) {
-        // Termin hinzufügen
-        day.appointments.push({
-            ...appointment,
-            startTime: slot.time,
-            endTime: this.formatTime(slot.startTime + this.constraints.appointmentDuration),
-            travelTimeThere: slot.travelTime,
-            customer: appointment.invitee_name // Für Frontend-Kompatibilität
-        });
+// HILFSFUNKTION: Geschätzte Reisezeit
+estimateTravelTime(appointment, travelMatrix) {
+    const travel = travelMatrix['home']?.[appointment.id];
+    return travel ? travel.duration.toFixed(1) : 'unbekannt';
+}
 
-        // Tagesstatistiken aktualisieren
-        day.workTime += this.constraints.appointmentDuration;
-        day.travelTime += slot.travelTime;
-        day.lastAppointmentEnd = slot.startTime + this.constraints.appointmentDuration;
-        day.currentLocation = appointment.id;
-
-        // Overtime prüfen
-        if (day.workTime > this.constraints.maxWorkHoursPerDay) {
-            day.overtime = true;
+// VERBESSERTE Übernachtungsplanung
+planOvernightStops(week, travelMatrix) {
+    console.log('🏨 Plane realistische Übernachtungen...');
+    
+    for (let i = 0; i < week.length; i++) {
+        const day = week[i];
+        if (day.appointments.length === 0) continue;
+        
+        const lastAppointment = day.appointments[day.appointments.length - 1];
+        const distanceHome = travelMatrix[lastAppointment.id]?.['home']?.distance || 0;
+        
+        // Übernachtung wenn weit von zu Hause entfernt
+        if (distanceHome >= this.constraints.overnightThreshold) {
+            const nearestCity = this.findNearestCity(lastAppointment.lat, lastAppointment.lng);
+            day.overnight = {
+                city: nearestCity,
+                reason: `${distanceHome.toFixed(0)}km von Hannover - Übernachtung nötig`,
+                distance: distanceHome
+            };
+            console.log(`🏨 ${day.day}: Übernachtung in ${nearestCity} (${distanceHome.toFixed(0)}km)`);
         }
     }
-
-    // ======================================================================
-    // ÜBERNACHTUNGSSTOPPS OPTIMIEREN
-    // ======================================================================
-    optimizeOvernightStops(week, travelMatrix) {
-        console.log('🏨 Optimiere Übernachtungsstopps...');
-        
-        for (let i = 0; i < week.length - 1; i++) {
-            const today = week[i];
-            const tomorrow = week[i + 1];
-
-            if (today.appointments.length > 0 && tomorrow.appointments.length > 0) {
-                const lastToday = today.appointments[today.appointments.length - 1];
-                const firstTomorrow = tomorrow.appointments[0];
-
-                // Prüfe ob Übernachtung sinnvoll ist
-                const directDistance = this.calculateHaversineDistance(lastToday, firstTomorrow);
-                
-                if (directDistance > 200) { // Mehr als 200km
-                    const overnightStop = this.calculateOptimalOvernightStop(lastToday, firstTomorrow, today);
-                    
-                    if (overnightStop) {
-                        today.overnight = overnightStop;
-                        console.log(`🏨 Übernachtung geplant: ${overnightStop.city}`);
-                    }
-                }
-            }
-        }
-
+}
         return week;
     }
 
@@ -889,6 +889,14 @@ formatTime(hours) {
             estimatedDay: totalScheduled < 10 ? Math.floor(totalScheduled / 2) + 1 : 'Ende der Woche'
         };
     }
+scheduleConfirmedAppointments
+scheduleProposalAppointments
+findBestSlotAnywhere
+canReturnHomeOrStayOvernight
+calculateRealisticScore
+forceScheduleAppointment
+estimateTravelTime
+planOvernightStops
 }
 
 module.exports = IntelligentRoutePlanner;
