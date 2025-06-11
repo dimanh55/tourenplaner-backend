@@ -2,21 +2,21 @@ const axios = require('axios');
 const EnhancedGeocodingService = require('./geocoding-service');
 
 class IntelligentRoutePlanner {
-    constructor() {
-        this.geocodingService = new EnhancedGeocodingService();
-        this.constraints = {
-            maxWorkHoursPerWeek: 40,
-            maxWorkHoursPerDay: 8,
-            flexWorkHoursPerDay: 10, // Ausnahme möglich
-            workStartTime: 8, // 8:00 Uhr
-            workEndTime: 17, // 17:00 Uhr (zurück im Büro)
-            appointmentDuration: 3, // Stunden pro Dreh
-            homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' }, // Startpunkt
-            travelSpeedKmh: 80, // Durchschnittliche Reisegeschwindigkeit
-            maxTravelTimePerDay: 4 // Max 4h Fahrt pro Tag
-        };
-        this.distanceMatrixApiDisabled = false;
-    }
+constructor() {
+    this.geocodingService = new EnhancedGeocodingService();
+    this.constraints = {
+        maxWorkHoursPerWeek: 45,        // ERHÖHT: von 40 auf 45h
+        maxWorkHoursPerDay: 10,         // ERHÖHT: von 8 auf 10h  
+        flexWorkHoursPerDay: 12,        // ERHÖHT: von 10 auf 12h für Ausnahmen
+        workStartTime: 7,               // FRÜHER: von 8 auf 7 Uhr
+        workEndTime: 19,                // SPÄTER: von 17 auf 19 Uhr
+        appointmentDuration: 3,         // Bleibt: 3h pro Dreh
+        homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
+        travelSpeedKmh: 90,             // ERHÖHT: von 80 auf 90 km/h
+        maxTravelTimePerDay: 5          // ERHÖHT: von 4 auf 5h Fahrt pro Tag
+    };
+    this.distanceMatrixApiDisabled = false;
+}
 
     // ======================================================================
     // HAUPTFUNKTION: Intelligente Routenoptimierung
@@ -500,84 +500,149 @@ async calculateDistanceMatrixBatch(origins, destinations, matrix, apiKey) {
     // ======================================================================
     // BESTEN ZEITSLOT FINDEN
     // ======================================================================
-    findBestTimeSlot(week, appointment, travelMatrix) {
-        let bestSlot = null;
-        let bestScore = -1;
+findBestTimeSlot(week, appointment, travelMatrix) {
+    let bestSlot = null;
+    let bestScore = -1;
 
-        for (let dayIndex = 0; dayIndex < week.length; dayIndex++) {
-            const day = week[dayIndex];
-            
-            // Arbeitszeit-Constraints prüfen
-            const potentialWorkTime = day.workTime + this.constraints.appointmentDuration;
-            const maxAllowed = appointment.isConfirmed ? this.constraints.flexWorkHoursPerDay : this.constraints.maxWorkHoursPerDay;
-            
-            if (potentialWorkTime > maxAllowed) {
-                continue; // Tag bereits voll
-            }
+    for (let dayIndex = 0; dayIndex < week.length; dayIndex++) {
+        const day = week[dayIndex];
+        
+        // LOCKERE Arbeitszeit-Constraints
+        const potentialWorkTime = day.workTime + this.constraints.appointmentDuration;
+        
+        // Unterschiedliche Limits je nach Termintyp
+        let maxAllowed;
+        if (appointment.isConfirmed) {
+            maxAllowed = this.constraints.flexWorkHoursPerDay; // 12h für bestätigte Termine
+        } else if (appointment.priority > 80) {
+            maxAllowed = this.constraints.maxWorkHoursPerDay + 1; // 11h für hohe Priorität
+        } else {
+            maxAllowed = this.constraints.maxWorkHoursPerDay; // 10h für normale Termine
+        }
+        
+        if (potentialWorkTime > maxAllowed) {
+            console.log(`⏰ Tag ${dayIndex + 1} voll: ${potentialWorkTime}h würde ${maxAllowed}h überschreiten`);
+            continue;
+        }
 
-            // Reisezeit vom aktuellen Standort berechnen
-            const travelFromCurrent = travelMatrix[day.currentLocation]?.[appointment.id];
-            if (!travelFromCurrent) continue;
+        // Reisezeit vom aktuellen Standort berechnen
+        const travelFromCurrent = travelMatrix[day.currentLocation]?.[appointment.id];
+        if (!travelFromCurrent) {
+            console.log(`❌ Keine Reisedaten von ${day.currentLocation} zu ${appointment.id}`);
+            continue;
+        }
 
-            // Frühester Starttermin
-            const earliestStart = day.lastAppointmentEnd + travelFromCurrent.duration;
-            
-            // Prüfe ob der Termin an diesem Tag noch passt
-            const appointmentEnd = earliestStart + this.constraints.appointmentDuration;
-            if (appointmentEnd > this.constraints.workEndTime) {
-                // Versuche Rückreise-Zeit zu berücksichtigen
-                const returnHome = travelMatrix[appointment.id]?.['home'];
-                if (returnHome && appointmentEnd + returnHome.duration > this.constraints.workEndTime + 2) {
-                    continue; // Würde zu spät für Rückreise
-                }
-            }
-
-            // Score berechnen (je höher, desto besser)
-            const score = this.calculateSlotScore(day, appointment, travelFromCurrent, dayIndex);
-            
-            if (score > bestScore) {
-                bestScore = score;
-                bestSlot = {
-                    dayIndex,
-                    day: day.day,
-                    time: this.formatTime(earliestStart),
-                    startTime: earliestStart,
-                    travelTime: travelFromCurrent.duration,
-                    score
-                };
+        // FLEXIBLERE Zeitberechnung
+        let earliestStart = day.lastAppointmentEnd + travelFromCurrent.duration;
+        
+        // Mindestens 30min Pause zwischen Terminen
+        if (day.appointments.length > 0) {
+            earliestStart = Math.max(earliestStart, day.lastAppointmentEnd + 0.5);
+        }
+        
+        // Nicht vor Arbeitsbeginn
+        earliestStart = Math.max(earliestStart, this.constraints.workStartTime);
+        
+        // Termin muss vor Arbeitsende starten
+        if (earliestStart > this.constraints.workEndTime - this.constraints.appointmentDuration) {
+            console.log(`⏰ Tag ${dayIndex + 1}: Termin würde zu spät starten (${this.formatTime(earliestStart)})`);
+            continue;
+        }
+        
+        const appointmentEnd = earliestStart + this.constraints.appointmentDuration;
+        
+        // FLEXIBLERE Rückreise-Prüfung
+        const returnHome = travelMatrix[appointment.id]?.['home'];
+        if (returnHome) {
+            const totalEndTime = appointmentEnd + returnHome.duration;
+            // Erlaubt bis zu 2h Überstunden für Rückreise
+            if (totalEndTime > this.constraints.workEndTime + 2) {
+                console.log(`🏠 Tag ${dayIndex + 1}: Rückreise zu spät (${this.formatTime(totalEndTime)})`);
+                continue;
             }
         }
 
-        return bestSlot;
+        // VERBESSERTE Score-Berechnung
+        const score = this.calculateSlotScore(day, appointment, travelFromCurrent, dayIndex, earliestStart);
+        
+        console.log(`📊 Tag ${dayIndex + 1}: Score ${score.toFixed(1)} für ${appointment.invitee_name || appointment.customer} um ${this.formatTime(earliestStart)}`);
+        
+        if (score > bestScore) {
+            bestScore = score;
+            bestSlot = {
+                dayIndex,
+                day: day.day,
+                time: this.formatTime(earliestStart),
+                startTime: earliestStart,
+                travelTime: travelFromCurrent.duration,
+                score
+            };
+        }
     }
 
-    // ======================================================================
-    // SLOT-SCORE BERECHNEN
-    // ======================================================================
-    calculateSlotScore(day, appointment, travelData, dayIndex) {
-        let score = 100;
-
-        // Weniger Reisezeit = besser
-        score -= travelData.duration * 10;
-        
-        // Frühere Wochentage bevorzugen (außer bei sehr hoher Priorität)
-        score -= dayIndex * 3;
-        
-        // Bestätigte Termine bevorzugen
-        if (appointment.isConfirmed) score += 30;
-        
-        // Lange Pipeline-Zeit bevorzugen
-        score += appointment.pipeline_age * 0.3;
-        
-        // Tag nicht zu voll machen
-        if (day.workTime > 6) score -= 15;
-        if (day.workTime > 7) score -= 25;
-        
-        // VIP-Kunden bevorzugen
-        if (appointment.priority > 80) score += 20;
-        
-        return Math.max(0, score);
+    if (bestSlot) {
+        console.log(`✅ Bester Slot: ${bestSlot.day} ${bestSlot.time} (Score: ${bestSlot.score.toFixed(1)})`);
+    } else {
+        console.log(`❌ Kein Slot gefunden für ${appointment.invitee_name || appointment.customer}`);
     }
+
+    return bestSlot;
+}
+
+// NEUE VERBESSERTE calculateSlotScore Funktion:
+
+calculateSlotScore(day, appointment, travelData, dayIndex, startTime) {
+    let score = 100; // Basis-Score
+
+    // Weniger Reisezeit = besser (aber weniger gewichtet)
+    score -= travelData.duration * 5; // Reduziert von 10 auf 5
+    
+    // Bestätigte Termine haben höchste Priorität
+    if (appointment.isConfirmed) score += 50; // Erhöht von 30 auf 50
+    
+    // Hohe Priorität bevorzugen
+    if (appointment.priority > 80) score += 25;
+    else if (appointment.priority > 60) score += 10;
+    
+    // Pipeline-Alter berücksichtigen (ältere Termine bevorzugen)
+    score += Math.min(appointment.pipeline_age * 0.5, 15);
+    
+    // Frühere Wochentage bevorzugen (aber weniger stark)
+    score -= dayIndex * 2; // Reduziert von 3 auf 2
+    
+    // Tag nicht zu voll machen (aber lockerer)
+    if (day.workTime > 8) score -= 10; // Reduziert Penalty
+    if (day.workTime > 10) score -= 15; // Erst bei 10h+ starke Penalty
+    
+    // Optimale Tageszeiten bevorzugen
+    if (startTime >= 9 && startTime <= 15) {
+        score += 15; // Bonus für 9-15 Uhr
+    } else if (startTime >= 7 && startTime <= 17) {
+        score += 5; // Kleiner Bonus für 7-17 Uhr
+    }
+    
+    // VIP-Kunden extra bevorzugen
+    if (appointment.priority > 90) score += 30;
+    
+    // Weniger Termine am Tag = höherer Score
+    score += (5 - day.appointments.length) * 5;
+
+    return Math.max(0, score);
+}
+
+// VERBESSERTE formatTime Funktion (fixt das 12:60 Problem):
+
+formatTime(hours) {
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    
+    // FIX: Behandle 60 Minuten korrekt
+    if (m >= 60) {
+        return `${(h + 1).toString().padStart(2, '0')}:00`;
+    }
+    
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+}
 
     // ======================================================================
     // TERMIN ZU SLOT ZUWEISEN
