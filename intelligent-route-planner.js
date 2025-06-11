@@ -122,9 +122,19 @@ class IntelligentRoutePlanner {
     // ======================================================================
     async geocodeAppointments(appointments) {
         console.log('🗺️ Geocoding von Adressen mit Google Maps API...');
-        
+
         const geocoded = [];
         for (const apt of appointments) {
+            // Bereits vorhandene Koordinaten nutzen
+            if (apt.lat && apt.lng) {
+                geocoded.push({
+                    ...apt,
+                    geocoded: true,
+                    geocoding_method: 'database'
+                });
+                continue;
+            }
+
             try {
                 const coords = await this.geocodingService.geocodeAddress(apt.address);
                 geocoded.push({
@@ -153,7 +163,7 @@ class IntelligentRoutePlanner {
                 }
             }
         }
-        
+
         return geocoded.filter(apt => apt.geocoded); // Nur geocodierte Termine
     }
 
