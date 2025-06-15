@@ -387,7 +387,7 @@ app.get('/api/appointments', async (req, res) => {
     try {
         const rows = await new Promise((resolve, reject) => {
             db.all(
-                "SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') ORDER BY created_at DESC",
+                "SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') AND (is_fixed IS NULL OR is_fixed = 0) ORDER BY created_at DESC",
                 (err, result) => (err ? reject(err) : resolve(result))
             );
         });
