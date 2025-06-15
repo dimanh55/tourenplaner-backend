@@ -382,23 +382,30 @@ app.post('/api/auth/login', function(req, res) {
     }
 });
 
-// Get appointments (exclude on_hold)
-app.get('/api/appointments', (req, res) => {
-    db.all("SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') ORDER BY created_at DESC", (err, rows) => {
-        if (err) {
-            res.status(500).json({ error: err.message });
-            return;
-        }
-        
-        // Parse notes and enhance appointment data
-        const enhancedRows = rows.map(row => {
+// Get appointments (exclude on_hold and already planned)
+app.get('/api/appointments', async (req, res) => {
+    try {
+        const rows = await new Promise((resolve, reject) => {
+            db.all(
+                "SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') ORDER BY created_at DESC",
+                (err, result) => (err ? reject(err) : resolve(result))
+            );
+        });
+
+        // IDs aller Termine, die bereits in gespeicherten Routen vorkommen
+        const usedIds = await getUsedAppointmentIds();
+
+        // Nur Termine zurückgeben, die noch nicht verplant wurden
+        const filteredRows = rows.filter(row => !usedIds.includes(row.id));
+
+        const enhancedRows = filteredRows.map(row => {
             let parsedNotes = {};
             try {
                 parsedNotes = JSON.parse(row.notes || '{}');
             } catch (e) {
                 parsedNotes = {};
             }
-            
+
             return {
                 ...row,
                 invitee_name: parsedNotes.invitee_name || row.customer,
@@ -407,9 +414,11 @@ app.get('/api/appointments', (req, res) => {
                 start_time: parsedNotes.start_time || null
             };
         });
-        
+
         res.json(enhancedRows);
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Get drivers
@@ -544,15 +553,19 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
 // KORRIGIERTE VERSION: Verhindert doppelte Planung von Terminen
 async function getUsedAppointmentIds(excludeWeekStart) {
     return new Promise((resolve, reject) => {
-        // Hole ALLE gespeicherten Routen, nicht nur aktive
-        db.all(
-            "SELECT route_data, week_start FROM saved_routes WHERE week_start != ?",
-            [excludeWeekStart],
-            (err, rows) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
+        // Hole ALLE gespeicherten Routen, optional ohne eine bestimmte Woche
+        let query = "SELECT route_data, week_start FROM saved_routes";
+        const params = [];
+        if (excludeWeekStart) {
+            query += " WHERE week_start != ?";
+            params.push(excludeWeekStart);
+        }
+
+        db.all(query, params, (err, rows) => {
+            if (err) {
+                reject(err);
+                return;
+            }
                 
                 const usedIds = new Set();
                 const usedByWeek = {};
