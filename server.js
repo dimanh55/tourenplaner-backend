@@ -58,6 +58,34 @@ User-agent: facebookexternalhit
 Disallow: /`);
 });
 
+
+// 🛡️ Security Headers (direkt nach robots.txt)
+app.use((req, res, next) => {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    next();
+});
+
+// ======================================================================
+// STANDARD MIDDLEWARE
+// ======================================================================
+
+// CORS Configuration
+app.use(cors({
+    origin: [
+        'https://expertise-zeigen.de',
+        'https://www.expertise-zeigen.de'
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false
+}));
+
+// JSON body parsing
+app.use(express.json());
 // Configure multer for file uploads
 const upload = multer({ 
     storage: multer.memoryStorage(),
