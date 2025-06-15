@@ -390,23 +390,30 @@ class IntelligentRoutePlanner {
     // REALISTISCHE WOCHENPLANUNG
     // ======================================================================
     async planOptimalWeek(appointments, travelMatrix, weekStart) {
-        console.log('🚗 Starte REALISTISCHE Testimonial-Planung...');
-        console.log(`📊 Akzeptiere Fahrten bis ${this.constraints.maxSingleTravelTime}h (ca. 400km)`);
-       
-        // Auch Termine ohne feste Uhrzeit berücksichtigen (Standard 10:00)
+        console.log('🚗 Starte REALISTISCHE UND LOGISCHE Routenplanung...');
+        console.log(`📊 Constraints: ${this.constraints.maxWorkHoursPerDay}h/Tag, max ${this.constraints.maxSingleTravelTime}h Fahrt`);
+
         const fixedAppointments = appointments.filter(a => a.isFixed && a.fixedDate);
         const confirmedAppointments = appointments.filter(apt => apt.isConfirmed && !apt.isFixed);
         const proposalAppointments = appointments.filter(apt => apt.isProposal && !apt.isFixed);
 
-        console.log(`📅 ${confirmedAppointments.length} bestätigte + ${proposalAppointments.length} Vorschlag-Termine + ${fixedAppointments.length} fixe Termine`);
+        console.log(`📅 Termine: ${fixedAppointments.length} fix, ${confirmedAppointments.length} bestätigt, ${proposalAppointments.length} Vorschläge`);
 
         const week = this.initializeWeek(weekStart);
 
         await this.scheduleFixedAppointments(week, fixedAppointments);
-        await this.scheduleConfirmedAppointments(week, confirmedAppointments, travelMatrix);
-        await this.scheduleProposalAppointments(week, proposalAppointments, travelMatrix);
+
+        const appointmentsByRegion = this.groupAppointmentsByRegion([
+            ...confirmedAppointments,
+            ...proposalAppointments
+        ]);
+
+        await this.scheduleByRegionalClusters(week, appointmentsByRegion, travelMatrix);
+
+        this.optimizeDailyRoutes(week, travelMatrix);
+
         this.planOvernightStops(week, travelMatrix);
-        
+
         return week;
     }
 
@@ -951,11 +958,383 @@ class IntelligentRoutePlanner {
     canFitAppointment(weekPlan, appointment) {
         const totalScheduled = weekPlan.stats.totalAppointments;
         const maxPossible = Math.floor(this.constraints.maxWorkHoursPerWeek / this.constraints.appointmentDuration);
-        
+
         return {
             canFit: totalScheduled < maxPossible,
             availableSlots: maxPossible - totalScheduled,
             estimatedDay: totalScheduled < 10 ? Math.floor(totalScheduled / 2) + 1 : 'Ende der Woche'
+        };
+    }
+
+    // ======================================================================
+    // TERMINE NACH REGIONEN GRUPPIEREN
+    // ======================================================================
+    groupAppointmentsByRegion(appointments) {
+        const regions = {
+            'Nord': { center: { lat: 53.5, lng: 10.0 }, appointments: [] },
+            'Ost': { center: { lat: 52.5, lng: 13.4 }, appointments: [] },
+            'West': { center: { lat: 51.2, lng: 7.0 }, appointments: [] },
+            'Süd': { center: { lat: 48.5, lng: 11.5 }, appointments: [] },
+            'Mitte': { center: { lat: 50.5, lng: 9.0 }, appointments: [] }
+        };
+
+        appointments.forEach(apt => {
+            let minDistance = Infinity;
+            let bestRegion = 'Mitte';
+
+            Object.entries(regions).forEach(([regionName, regionData]) => {
+                const distance = this.calculateHaversineDistance(
+                    { lat: apt.lat, lng: apt.lng },
+                    regionData.center
+                );
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    bestRegion = regionName;
+                }
+            });
+
+            regions[bestRegion].appointments.push({
+                ...apt,
+                distanceToCenter: minDistance
+            });
+        });
+
+        Object.entries(regions).forEach(([name, data]) => {
+            if (data.appointments.length > 0) {
+                console.log(`📍 Region ${name}: ${data.appointments.length} Termine`);
+            }
+        });
+
+        return regions;
+    }
+
+    // ======================================================================
+    // REGIONALE CLUSTER-BASIERTE PLANUNG
+    // ======================================================================
+    async scheduleByRegionalClusters(week, regionGroups, travelMatrix) {
+        console.log('🗺️ Plane Termine nach regionalen Clustern...');
+
+        const homeBase = this.constraints.homeBase;
+        const sortedRegions = Object.entries(regionGroups)
+            .filter(([_, data]) => data.appointments.length > 0)
+            .sort((a, b) => {
+                const distA = this.calculateHaversineDistance(homeBase, a[1].center);
+                const distB = this.calculateHaversineDistance(homeBase, b[1].center);
+                return distA - distB;
+            });
+
+        for (const [regionName, regionData] of sortedRegions) {
+            console.log(`\n🎯 Plane Region ${regionName} (${regionData.appointments.length} Termine)`);
+
+            const sortedAppointments = regionData.appointments.sort((a, b) => {
+                if (a.isConfirmed !== b.isConfirmed) {
+                    return a.isConfirmed ? -1 : 1;
+                }
+                return b.pipeline_days - a.pipeline_days;
+            });
+
+            await this.scheduleRegionAppointments(week, sortedAppointments, travelMatrix, regionName);
+        }
+    }
+
+    // ======================================================================
+    // TERMINE EINER REGION EINPLANEN
+    // ======================================================================
+    async scheduleRegionAppointments(week, appointments, travelMatrix, regionName) {
+        const regionDays = this.findBestDaysForRegion(week, appointments, travelMatrix);
+
+        for (const apt of appointments) {
+            let scheduled = false;
+
+            for (const dayInfo of regionDays) {
+                const day = week[dayInfo.dayIndex];
+
+                if (day.workTime + 3 > this.constraints.maxWorkHoursPerDay) {
+                    continue;
+                }
+
+                const slot = this.findOptimalTimeSlot(day, apt, travelMatrix);
+
+                if (slot) {
+                    this.assignAppointmentToSlot(day, apt, slot, travelMatrix);
+                    console.log(`✅ ${apt.customer} → ${day.day} ${slot.time} (Region ${regionName})`);
+                    scheduled = true;
+                    break;
+                }
+            }
+
+            if (!scheduled && apt.isConfirmed) {
+                console.log(`⚠️ Suche Notfall-Slot für bestätigten Termin: ${apt.customer}`);
+                const emergencySlot = this.findEmergencySlot(week, apt, travelMatrix);
+                if (emergencySlot) {
+                    this.assignAppointmentToSlot(week[emergencySlot.dayIndex], apt, emergencySlot, travelMatrix);
+                    console.log(`🚨 NOTFALL: ${apt.customer} → ${emergencySlot.day} ${emergencySlot.time}`);
+                }
+            }
+        }
+    }
+
+    // ======================================================================
+    // BESTE TAGE FÜR EINE REGION FINDEN
+    // ======================================================================
+    findBestDaysForRegion(week, regionAppointments, travelMatrix) {
+        const dayScores = [];
+
+        for (let i = 0; i < week.length; i++) {
+            const day = week[i];
+            let score = 100;
+
+            const availableHours = this.constraints.maxWorkHoursPerDay - day.workTime;
+            score += availableHours * 10;
+
+            let nearbyAppointments = 0;
+            day.appointments.forEach(existingApt => {
+                regionAppointments.forEach(newApt => {
+                    const distance = this.calculateHaversineDistance(existingApt, newApt);
+                    if (distance < 100) {
+                        nearbyAppointments++;
+                        score += 20;
+                    }
+                });
+            });
+
+            const avgDistance = regionAppointments.reduce((sum, apt) =>
+                sum + this.calculateHaversineDistance(this.constraints.homeBase, apt), 0
+            ) / regionAppointments.length;
+
+            if (avgDistance > 200 && i >= 3) {
+                score -= 30;
+            }
+
+            dayScores.push({
+                dayIndex: i,
+                day: day.day,
+                score,
+                availableHours,
+                nearbyAppointments
+            });
+        }
+
+        return dayScores
+            .sort((a, b) => b.score - a.score)
+            .filter(d => d.availableHours >= 3);
+    }
+
+    // ======================================================================
+    // OPTIMALEN ZEITSLOT FINDEN
+    // ======================================================================
+    findOptimalTimeSlot(day, appointment, travelMatrix) {
+        const slots = [];
+
+        const sortedAppointments = [...day.appointments].sort((a, b) =>
+            this.timeToHours(a.startTime) - this.timeToHours(b.startTime)
+        );
+
+        let currentTime = this.constraints.workStartTime;
+
+        if (sortedAppointments.length === 0) {
+            const travelFromHome = travelMatrix['home']?.[appointment.id];
+            if (travelFromHome) {
+                currentTime = Math.max(currentTime, 6 + travelFromHome.duration);
+            }
+        }
+
+        for (let i = 0; i <= sortedAppointments.length; i++) {
+            let slotStart = currentTime;
+            let slotEnd;
+
+            if (i < sortedAppointments.length) {
+                slotEnd = this.timeToHours(sortedAppointments[i].startTime);
+            } else {
+                slotEnd = this.constraints.workEndTime;
+            }
+
+            if (i > 0) {
+                const prevApt = sortedAppointments[i - 1];
+                const travel = travelMatrix[prevApt.id]?.[appointment.id];
+                if (travel) {
+                    slotStart = Math.max(slotStart,
+                        this.timeToHours(prevApt.endTime) + travel.duration);
+                }
+            }
+
+            const appointmentEnd = slotStart + 3;
+
+            if (appointmentEnd <= slotEnd && appointmentEnd <= this.constraints.workEndTime) {
+                let score = 100;
+
+                score -= slotStart * 2;
+
+                if (i > 0) {
+                    const prevApt = sortedAppointments[i - 1];
+                    const travel = travelMatrix[prevApt.id]?.[appointment.id];
+                    if (travel && travel.duration < 1) {
+                        score += 20;
+                    }
+                }
+
+                slots.push({
+                    startTime: slotStart,
+                    endTime: appointmentEnd,
+                    score,
+                    travelTime: 0
+                });
+            }
+
+            if (i < sortedAppointments.length) {
+                currentTime = this.timeToHours(sortedAppointments[i].endTime);
+            }
+        }
+
+        if (slots.length > 0) {
+            const bestSlot = slots.sort((a, b) => b.score - a.score)[0];
+            return {
+                time: this.formatTime(bestSlot.startTime),
+                startTime: bestSlot.startTime,
+                travelTime: 0
+            };
+        }
+
+        return null;
+    }
+
+    // ======================================================================
+    // TAGESROUTEN OPTIMIEREN
+    // ======================================================================
+    optimizeDailyRoutes(week, travelMatrix) {
+        console.log('🔧 Optimiere Tagesrouten für minimale Fahrzeiten...');
+
+        week.forEach((day, dayIndex) => {
+            if (day.appointments.length <= 1) return;
+
+            console.log(`📅 Optimiere ${day.day} (${day.appointments.length} Termine)`);
+
+            const optimizedOrder = this.optimizeAppointmentOrder(day.appointments, travelMatrix);
+
+            let currentTime = this.constraints.workStartTime;
+            const homeTravel = travelMatrix['home']?.[optimizedOrder[0].id];
+            if (homeTravel) {
+                currentTime = Math.max(currentTime, 6 + homeTravel.duration);
+            }
+
+            optimizedOrder.forEach((apt, index) => {
+                apt.startTime = this.formatTime(currentTime);
+                apt.endTime = this.formatTime(currentTime + 3);
+
+                if (index < optimizedOrder.length - 1) {
+                    const travel = travelMatrix[apt.id]?.[optimizedOrder[index + 1].id];
+                    if (travel) {
+                        currentTime += 3 + travel.duration;
+                        if (travel.duration > 2) {
+                            currentTime += 0.5;
+                        }
+                    } else {
+                        currentTime += 3.5;
+                    }
+                } else {
+                    currentTime += 3;
+                }
+            });
+
+            day.appointments = optimizedOrder;
+
+            let totalTravel = 0;
+            if (homeTravel) totalTravel += homeTravel.duration;
+
+            for (let i = 0; i < optimizedOrder.length - 1; i++) {
+                const travel = travelMatrix[optimizedOrder[i].id]?.[optimizedOrder[i + 1].id];
+                if (travel) totalTravel += travel.duration;
+            }
+
+            const lastApt = optimizedOrder[optimizedOrder.length - 1];
+            const returnTravel = travelMatrix[lastApt.id]?.['home'];
+            if (returnTravel) totalTravel += returnTravel.duration;
+
+            day.travelTime = Math.round(totalTravel * 10) / 10;
+
+            console.log(`   → Optimiert: ${day.travelTime}h Fahrtzeit`);
+        });
+    }
+
+    // ======================================================================
+    // TERMIN-REIHENFOLGE OPTIMIEREN (NEAREST NEIGHBOR)
+    // ======================================================================
+    optimizeAppointmentOrder(appointments, travelMatrix) {
+        if (appointments.length <= 1) return appointments;
+
+        const unvisited = [...appointments];
+        const route = [];
+
+        let current = unvisited.reduce((nearest, apt) => {
+            const distToHome = this.calculateHaversineDistance(this.constraints.homeBase, apt);
+            const nearestDist = this.calculateHaversineDistance(this.constraints.homeBase, nearest);
+            return distToHome < nearestDist ? apt : nearest;
+        });
+
+        route.push(current);
+        unvisited.splice(unvisited.indexOf(current), 1);
+
+        while (unvisited.length > 0) {
+            let nearestIndex = 0;
+            let nearestDistance = Infinity;
+
+            unvisited.forEach((apt, index) => {
+                const travel = travelMatrix[current.id]?.[apt.id];
+                const distance = travel ? travel.distance :
+                    this.calculateHaversineDistance(current, apt);
+
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestIndex = index;
+                }
+            });
+
+            current = unvisited[nearestIndex];
+            route.push(current);
+            unvisited.splice(nearestIndex, 1);
+        }
+
+        return route;
+    }
+
+    // ======================================================================
+    // NOTFALL-SLOT FÜR BESTÄTIGTE TERMINE
+    // ======================================================================
+    findEmergencySlot(week, appointment, travelMatrix) {
+        console.log(`🚨 Suche Notfall-Slot für: ${appointment.customer}`);
+
+        let bestDay = null;
+        let bestDayIndex = -1;
+        let minWorkTime = Infinity;
+
+        week.forEach((day, index) => {
+            if (day.workTime < minWorkTime && day.workTime + 3 <= this.constraints.flexWorkHoursPerDay) {
+                minWorkTime = day.workTime;
+                bestDay = day;
+                bestDayIndex = index;
+            }
+        });
+
+        if (!bestDay) {
+            console.error(`❌ Kein Notfall-Slot möglich für ${appointment.customer}`);
+            return null;
+        }
+
+        let latestStart = this.constraints.workStartTime;
+
+        if (bestDay.appointments.length > 0) {
+            const lastApt = bestDay.appointments[bestDay.appointments.length - 1];
+            const travel = travelMatrix[lastApt.id]?.[appointment.id];
+            latestStart = this.timeToHours(lastApt.endTime) + (travel ? travel.duration : 1);
+        }
+
+        return {
+            dayIndex: bestDayIndex,
+            day: bestDay.day,
+            time: this.formatTime(latestStart),
+            startTime: latestStart,
+            travelTime: 0,
+            score: 0
         };
     }
 }
