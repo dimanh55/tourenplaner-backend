@@ -5,7 +5,7 @@ class IntelligentRoutePlanner {
     constructor() {
         this.geocodingService = new EnhancedGeocodingService();
         this.constraints = {
-            maxWorkHoursPerWeek: 50,        // Realistische 50h für Testimonials
+            maxWorkHoursPerWeek: 42.5,      // Max 40h Arbeit + 2.5h Pausen
             maxWorkHoursPerDay: 12,         // Arbeit + Fahrtzeit (Ende 18:00)
             flexWorkHoursPerDay: 14,        // Absolute Obergrenze mit Überstunden
             workStartTime: 6,               // Früh starten für lange Fahrten
@@ -505,12 +505,13 @@ class IntelligentRoutePlanner {
             }
             
             let startTime = day.lastAppointmentEnd + travelFromCurrent.duration;
-            
+
             if (travelFromCurrent.duration > 2) {
                 startTime += 0.5;
             }
-            
+
             startTime = Math.max(startTime, this.constraints.workStartTime);
+            startTime = Math.round(startTime * 2) / 2; // nur 30‑Minuten‑Schritte
             
             const appointmentEnd = startTime + this.constraints.appointmentDuration;
             
@@ -614,6 +615,7 @@ class IntelligentRoutePlanner {
         
         let startTime = day.lastAppointmentEnd + travelFromCurrent.duration + 0.5;
         startTime = Math.max(startTime, this.constraints.workStartTime);
+        startTime = Math.round(startTime * 2) / 2; // nur 30‑Minuten‑Schritte
         
         return {
             dayIndex: bestDay,
@@ -872,14 +874,15 @@ class IntelligentRoutePlanner {
     // HILFSFUNKTIONEN
     // ======================================================================
     formatTime(hours) {
-        const h = Math.floor(hours);
-        const m = Math.round((hours - h) * 60);
-        
+        const rounded = Math.round(hours * 2) / 2; // nur 30‑Minuten‑Schritte
+        const h = Math.floor(rounded);
+        const m = Math.round((rounded - h) * 60);
+
         // FIX: 60 Minuten korrekt behandeln
         if (m >= 60) {
             return `${(h + 1).toString().padStart(2, '0')}:00`;
         }
-        
+
         return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
     }
 

@@ -917,6 +917,7 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
                             timeToHours(slot.startTime),
                             prevApt ? timeToHours(prevApt.endTime) + travelFromPrev : (dayIndex === 0 ? 9 + travelFromPrev : timeToHours(slot.startTime))
                         );
+                        startTimeHours = Math.round(startTimeHours * 2) / 2; // nur 30‑Minuten‑Schritte
 
                         let endTimeHours = startTimeHours + 3;
 
@@ -1146,8 +1147,9 @@ function timeToHours(timeStr) {
 
 function hoursToTime(hours) {
     hours = ((hours % 24) + 24) % 24; // Wrap around 24h and avoid negatives
-    const h = Math.floor(hours);
-    const m = Math.round((hours - h) * 60);
+    const rounded = Math.round(hours * 2) / 2; // nur 30‑Minuten‑Schritte
+    const h = Math.floor(rounded);
+    const m = Math.round((rounded - h) * 60);
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
 }
 
@@ -1281,7 +1283,7 @@ function formatOptimizedWeek(week, weekStart) {
             efficiency: {
                 travelEfficiency: totalWorkHours > 0 ? 
                     Math.round((1 - totalTravelHours / (totalWorkHours + totalTravelHours)) * 100) / 100 : 0,
-                weekUtilization: Math.round((totalWorkHours / 50) * 100) / 100
+                weekUtilization: Math.round((totalWorkHours / 42.5) * 100) / 100
             }
         },
         generatedAt: new Date().toISOString()
