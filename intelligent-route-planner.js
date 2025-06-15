@@ -14,7 +14,7 @@ class IntelligentRoutePlanner {
             homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
             travelSpeedKmh: 85,             // Realistisch mit Pausen
             travelMode: 'driving',         // Immer mit dem PKW unterwegs
-            travelTimePadding: 0.25,       // 15 Minuten Puffer pro Fahrt
+            travelTimePadding: 0.25,       // 15 Min Fahrzeit-Puffer
             maxTravelTimePerDay: 8,         // Bis zu 8h Fahrt pro Tag OK
             maxSingleTravelTime: 5,         // Einzelfahrt bis 5h (400km)
             overnightThreshold: 200,        // Übernachtung ab 200km vom Heimatort
