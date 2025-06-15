@@ -382,44 +382,6 @@ app.post('/api/auth/login', function(req, res) {
     }
 });
 
-// Get appointments (exclude on_hold and already planned)
-app.get('/api/appointments', async (req, res) => {
-    try {
-        const rows = await new Promise((resolve, reject) => {
-            db.all(
-                "SELECT * FROM appointments WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') AND (is_fixed IS NULL OR is_fixed = 0) ORDER BY created_at DESC",
-                (err, result) => (err ? reject(err) : resolve(result))
-            );
-        });
-
-        // IDs aller Termine, die bereits in gespeicherten Routen vorkommen
-        const usedIds = await getUsedAppointmentIds();
-
-        // Nur Termine zurückgeben, die noch nicht verplant wurden
-        const filteredRows = rows.filter(row => !usedIds.includes(row.id));
-
-        const enhancedRows = filteredRows.map(row => {
-            let parsedNotes = {};
-            try {
-                parsedNotes = JSON.parse(row.notes || '{}');
-            } catch (e) {
-                parsedNotes = {};
-            }
-
-            return {
-                ...row,
-                invitee_name: parsedNotes.invitee_name || row.customer,
-                company: parsedNotes.company || '',
-                customer_company: parsedNotes.customer_company || '',
-                start_time: parsedNotes.start_time || null
-            };
-        });
-
-        res.json(enhancedRows);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
 
 // Get drivers
 app.get('/api/drivers', (req, res) => {
@@ -2440,6 +2402,456 @@ app.put('/api/admin/reschedule-fixed-appointment/:id', validateSession, async (r
         });
     }
 });
+
+// ======================================================================
+// NEUE BACKEND ROUTES FÜR TERMINE UND ANALYSEN
+// ======================================================================
+
+// Get ALL appointments including fixed ones (for calendar display)
+app.get('/api/appointments/all', async (req, res) => {
+    try {
+        console.log('📋 Lade ALLE Termine (inkl. feste Termine) für Kalender...');
+
+        const rows = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT * FROM appointments 
+                WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') 
+                ORDER BY 
+                    is_fixed DESC,
+                    fixed_date ASC,
+                    fixed_time ASC,
+                    created_at DESC
+            `, (err, result) => (err ? reject(err) : resolve(result))
+            );
+        });
+
+        const enhancedRows = rows.map(row => {
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(row.notes || '{}');
+            } catch (e) {
+                parsedNotes = {};
+            }
+
+            return {
+                ...row,
+                invitee_name: parsedNotes.invitee_name || row.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || '',
+                start_time: parsedNotes.start_time || null,
+                is_fixed: Boolean(row.is_fixed),
+                _debug: {
+                    raw_is_fixed: row.is_fixed,
+                    has_fixed_date: !!row.fixed_date,
+                    has_fixed_time: !!row.fixed_time
+                }
+            };
+        });
+
+        const stats = {
+            total: enhancedRows.length,
+            fixed: enhancedRows.filter(apt => apt.is_fixed).length,
+            flexible: enhancedRows.filter(apt => !apt.is_fixed).length,
+            confirmed: enhancedRows.filter(apt => apt.status === 'bestätigt').length,
+            proposals: enhancedRows.filter(apt => apt.status === 'vorschlag').length
+        };
+
+        console.log('📊 Termine-Statistiken:');
+        console.log(`   Total: ${stats.total}`);
+        console.log(`   Fixe Termine: ${stats.fixed}`);
+        console.log(`   Flexible Termine: ${stats.flexible}`);
+        console.log(`   Bestätigte Termine: ${stats.confirmed}`);
+        console.log(`   Vorschlag-Termine: ${stats.proposals}`);
+
+        res.json({
+            appointments: enhancedRows,
+            stats: stats,
+            meta: {
+                query_type: 'all_appointments_including_fixed',
+                timestamp: new Date().toISOString(),
+                filtering: 'only_on_hold_excluded'
+            }
+        });
+
+    } catch (err) {
+        console.error('❌ Fehler beim Laden aller Termine:', err);
+        res.status(500).json({ 
+            error: err.message,
+            context: 'loading_all_appointments_including_fixed'
+        });
+    }
+});
+
+// Get flexible appointments only (for route optimization) - enhanced version
+app.get('/api/appointments', async (req, res) => {
+    try {
+        console.log('🔧 Lade nur FLEXIBLE Termine für Routenoptimierung...');
+
+        const rows = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT * FROM appointments 
+                WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '') 
+                AND (is_fixed IS NULL OR is_fixed = 0)
+                ORDER BY 
+                    CASE WHEN status = 'bestätigt' THEN 0 ELSE 1 END,
+                    pipeline_days DESC,
+                    created_at DESC
+            `, (err, result) => (err ? reject(err) : resolve(result))
+            );
+        });
+
+        const usedIds = await getUsedAppointmentIds();
+        const filteredRows = rows.filter(row => !usedIds.includes(row.id));
+
+        const enhancedRows = filteredRows.map(row => {
+            let parsedNotes = {};
+            try {
+                parsedNotes = JSON.parse(row.notes || '{}');
+            } catch (e) {
+                parsedNotes = {};
+            }
+
+            return {
+                ...row,
+                invitee_name: parsedNotes.invitee_name || row.customer,
+                company: parsedNotes.company || '',
+                customer_company: parsedNotes.customer_company || '',
+                start_time: parsedNotes.start_time || null,
+                is_fixed: Boolean(row.is_fixed)
+            };
+        });
+
+        console.log(`📋 ${enhancedRows.length} flexible Termine verfügbar für Optimierung`);
+        console.log(`🚫 ${usedIds.length} Termine bereits in anderen Routen geplant`);
+
+        res.json(enhancedRows);
+    } catch (err) {
+        console.error('❌ Fehler beim Laden flexibler Termine:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Analyze appointments by type and status
+app.get('/api/admin/analyze-appointments', validateSession, async (req, res) => {
+    try {
+        console.log('🔍 Analysiere alle Termine nach Typ...');
+
+        const allTermine = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT 
+                    id, customer, address, priority, status, duration, pipeline_days,
+                    is_fixed, fixed_date, fixed_time, on_hold,
+                    lat, lng, geocoded, created_at
+                FROM appointments 
+                ORDER BY created_at DESC
+            `, (err, rows) => (err ? reject(err) : resolve(rows))
+            );
+        });
+
+        const analysis = {
+            total: allTermine.length,
+            by_type: {
+                fixed: allTermine.filter(apt => apt.is_fixed).length,
+                flexible: allTermine.filter(apt => !apt.is_fixed).length
+            },
+            by_status: {
+                bestätigt: allTermine.filter(apt => apt.status === 'bestätigt').length,
+                vorschlag: allTermine.filter(apt => apt.status === 'vorschlag').length,
+                abgesagt: allTermine.filter(apt => apt.status === 'abgesagt').length
+            },
+            by_hold_status: {
+                active: allTermine.filter(apt => !apt.on_hold || apt.on_hold.trim() === '').length,
+                on_hold: allTermine.filter(apt => apt.on_hold && apt.on_hold.trim() !== '').length
+            },
+            geocoded: {
+                with_coords: allTermine.filter(apt => apt.lat && apt.lng).length,
+                without_coords: allTermine.filter(apt => !apt.lat || !apt.lng).length
+            },
+            fixed_appointments_detail: allTermine
+                .filter(apt => apt.is_fixed)
+                .map(apt => ({
+                    id: apt.id,
+                    customer: apt.customer,
+                    fixed_date: apt.fixed_date,
+                    fixed_time: apt.fixed_time,
+                    status: apt.status,
+                    has_coords: !!(apt.lat && apt.lng)
+                }))
+        };
+
+        const issues = [];
+
+        if (analysis.fixed_appointments_detail.some(apt => !apt.fixed_date || !apt.fixed_time)) {
+            issues.push('⚠️ Einige fixe Termine haben kein Datum/Zeit');
+        }
+
+        if (analysis.geocoded.without_coords > 0) {
+            issues.push(`⚠️ ${analysis.geocoded.without_coords} Termine ohne Koordinaten`);
+        }
+
+        if (analysis.by_hold_status.on_hold > 0) {
+            issues.push(`ℹ️ ${analysis.by_hold_status.on_hold} Termine sind "on hold"`);
+        }
+
+        res.json({
+            success: true,
+            analysis: analysis,
+            issues: issues,
+            recommendations: [
+                analysis.fixed_appointments_detail.length > 0 ? 
+                    `✅ ${analysis.fixed_appointments_detail.length} fixe Termine gefunden` : 
+                    'ℹ️ Keine fixen Termine vorhanden',
+                analysis.geocoded.with_coords > 0 ? 
+                    `✅ ${analysis.geocoded.with_coords} Termine haben Koordinaten` : 
+                    '❌ Geocoding für Termine erforderlich',
+                analysis.by_status.bestätigt + analysis.by_status.vorschlag > 0 ? 
+                    `✅ ${analysis.by_status.bestätigt + analysis.by_status.vorschlag} planbare Termine` : 
+                    '❌ Keine planbaren Termine gefunden'
+            ],
+            sample_fixed: analysis.fixed_appointments_detail.slice(0, 5),
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler bei Termin-Analyse:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Create a new fixed appointment
+app.post('/api/appointments/fixed', validateSession, async (req, res) => {
+    const { 
+        customer, address, fixed_date, fixed_time, 
+        duration = 3, company = '', customer_company = '',
+        priority = 'hoch', status = 'bestätigt' 
+    } = req.body;
+
+    if (!customer || !address || !fixed_date || !fixed_time) {
+        return res.status(400).json({ 
+            error: 'customer, address, fixed_date und fixed_time sind erforderlich' 
+        });
+    }
+
+    try {
+        const conflicts = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, fixed_time, duration
+                FROM appointments 
+                WHERE is_fixed = 1 
+                AND fixed_date = ?
+            `, [fixed_date], (err, rows) => {
+                if (err) reject(err); else resolve(rows);
+            });
+        });
+
+        const newStart = timeToHours(fixed_time);
+        const newEnd = newStart + duration;
+
+        for (const apt of conflicts) {
+            const aptStart = timeToHours(apt.fixed_time);
+            const aptEnd = aptStart + (apt.duration || 3);
+
+            if (newStart < aptEnd && aptStart < newEnd) {
+                return res.status(400).json({
+                    error: 'Zeitkonflikt mit anderem fixen Termin',
+                    conflictsWith: apt.customer,
+                    conflictTime: `${apt.fixed_time} - ${hoursToTime(aptEnd)}`
+                });
+            }
+        }
+
+        const notes = JSON.stringify({
+            invitee_name: customer,
+            company: company,
+            customer_company: customer_company,
+            start_time: `${fixed_date} ${fixed_time}`,
+            custom_notes: 'Manuell erstellter fixer Termin',
+            created_via: 'admin_interface',
+            source: 'Manual Fixed Appointment Creation'
+        });
+
+        const result = await new Promise((resolve, reject) => {
+            db.run(`
+                INSERT INTO appointments 
+                (customer, address, priority, status, duration, pipeline_days, notes, 
+                 is_fixed, fixed_date, fixed_time, lat, lng, geocoded)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, NULL, 0)
+            `, [
+                customer, address, priority, status, duration, 7, notes,
+                fixed_date, fixed_time
+            ], function(err) {
+                if (err) reject(err);
+                else resolve({ id: this.lastID });
+            });
+        });
+
+        console.log(`✅ Fixer Termin erstellt: ${customer} am ${fixed_date} ${fixed_time}`);
+
+        res.json({
+            success: true,
+            message: 'Fixer Termin erfolgreich erstellt',
+            appointment: {
+                id: result.id,
+                customer: customer,
+                fixed_date: fixed_date,
+                fixed_time: fixed_time,
+                duration: duration
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Erstellen des fixen Termins:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Update a fixed appointment
+app.put('/api/appointments/fixed/:id', validateSession, async (req, res) => {
+    const { id } = req.params;
+    const { fixed_date, fixed_time, duration, customer, address } = req.body;
+
+    try {
+        const appointment = await new Promise((resolve, reject) => {
+            db.get(
+                "SELECT * FROM appointments WHERE id = ? AND is_fixed = 1",
+                [id],
+                (err, row) => (err ? reject(err) : resolve(row))
+            );
+        });
+
+        if (!appointment) {
+            return res.status(404).json({ error: 'Fixer Termin nicht gefunden' });
+        }
+
+        if (fixed_date && fixed_time) {
+            const conflicts = await new Promise((resolve, reject) => {
+                db.all(`
+                    SELECT id, customer, fixed_time, duration
+                    FROM appointments 
+                    WHERE is_fixed = 1 
+                    AND fixed_date = ? 
+                    AND id != ?
+                `, [fixed_date, id], (err, rows) => {
+                    if (err) reject(err); else resolve(rows);
+                });
+            });
+
+            const newStart = timeToHours(fixed_time);
+            const newEnd = newStart + (duration || appointment.duration);
+
+            for (const apt of conflicts) {
+                const aptStart = timeToHours(apt.fixed_time);
+                const aptEnd = aptStart + (apt.duration || 3);
+
+                if (newStart < aptEnd && aptStart < newEnd) {
+                    return res.status(400).json({
+                        error: 'Zeitkonflikt',
+                        conflictsWith: apt.customer,
+                        conflictTime: `${apt.fixed_time} - ${hoursToTime(aptEnd)}`
+                    });
+                }
+            }
+        }
+
+        const updates = [];
+        const values = [];
+
+        if (fixed_date) {
+            updates.push('fixed_date = ?');
+            values.push(fixed_date);
+        }
+        if (fixed_time) {
+            updates.push('fixed_time = ?');
+            values.push(fixed_time);
+        }
+        if (duration) {
+            updates.push('duration = ?');
+            values.push(duration);
+        }
+        if (customer) {
+            updates.push('customer = ?');
+            values.push(customer);
+        }
+        if (address) {
+            updates.push('address = ?', 'geocoded = 0');
+            values.push(address, 0);
+        }
+
+        values.push(id);
+
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE appointments SET ${updates.join(', ')} WHERE id = ?`,
+                values,
+                (err) => (err ? reject(err) : resolve())
+            );
+        });
+
+        console.log(`✅ Fixer Termin ${id} aktualisiert`);
+
+        res.json({
+            success: true,
+            message: 'Fixer Termin erfolgreich aktualisiert'
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Aktualisieren des fixen Termins:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Delete a fixed appointment
+app.delete('/api/appointments/fixed/:id', validateSession, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const result = await new Promise((resolve, reject) => {
+            db.run(
+                "DELETE FROM appointments WHERE id = ? AND is_fixed = 1",
+                [id],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve({ changes: this.changes });
+                }
+            );
+        });
+
+        if (result.changes === 0) {
+            return res.status(404).json({ error: 'Fixer Termin nicht gefunden' });
+        }
+
+        console.log(`🗑️ Fixer Termin ${id} gelöscht`);
+
+        res.json({
+            success: true,
+            message: 'Fixer Termin erfolgreich gelöscht'
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Löschen des fixen Termins:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+console.log('📌 Erweiterte Termine-Endpoints hinzugefügt:');
+console.log('  GET  /api/appointments/all - ALLE Termine (inkl. fixe)');
+console.log('  GET  /api/appointments - Nur flexible Termine');
+console.log('  GET  /api/admin/analyze-appointments - Termin-Analyse');
+console.log('  POST /api/appointments/fixed - Fixen Termin erstellen');
+console.log('  PUT  /api/appointments/fixed/:id - Fixen Termin bearbeiten');
+console.log('  DELETE /api/appointments/fixed/:id - Fixen Termin löschen');
 
 // ======================================================================
 // SERVER INTEGRATION FÜR ENHANCED GEOCODING SERVICE
