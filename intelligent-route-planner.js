@@ -78,6 +78,8 @@ class IntelligentRoutePlanner {
                 // Kategorisierung
                 isConfirmed: apt.status === 'bestätigt',
                 isProposal: apt.status === 'vorschlag',
+                // Einige Datenbanken liefern Zahlen als Strings -> Boolean cast
+                isFixed: Boolean(apt.is_fixed),
                 isFixed: apt.is_fixed === 1,
                 fixedDate: apt.fixed_date,
                 fixedTime: apt.fixed_time,
@@ -391,7 +393,9 @@ class IntelligentRoutePlanner {
     async planOptimalWeek(appointments, travelMatrix, weekStart) {
         console.log('🚗 Starte REALISTISCHE Testimonial-Planung...');
         console.log(`📊 Akzeptiere Fahrten bis ${this.constraints.maxSingleTravelTime}h (ca. 400km)`);
-        
+       
+        // Auch Termine ohne feste Uhrzeit berücksichtigen (Standard 10:00)
+        const fixedAppointments = appointments.filter(a => a.isFixed && a.fixedDate);
         const fixedAppointments = appointments.filter(a => a.isFixed && a.fixedDate && a.fixedTime);
         const confirmedAppointments = appointments.filter(apt => apt.isConfirmed && !apt.isFixed);
         const proposalAppointments = appointments.filter(apt => apt.isProposal && !apt.isFixed);
@@ -446,6 +450,8 @@ class IntelligentRoutePlanner {
             }
 
             const day = week[dayIndex];
+            const startTimeStr = apt.fixedTime || '10:00';
+            const startHours = this.timeToHours(startTimeStr);
             const startHours = this.timeToHours(apt.fixedTime || '10:00');
             const endHours = startHours + (apt.duration || this.constraints.appointmentDuration);
 
@@ -459,6 +465,7 @@ class IntelligentRoutePlanner {
 
             day.appointments.push({
                 ...apt,
+                startTime: startTimeStr,
                 startTime: apt.fixedTime,
                 endTime: this.formatTime(endHours),
                 travelTimeThere: 0,
