@@ -58,38 +58,6 @@ User-agent: facebookexternalhit
 Disallow: /`);
 });
 
-// 🛡️ Security Headers (DIREKT nach robots.txt)
-app.use((req, res, next) => {
-    // Suchmaschinen abweisen
-    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
-    
-    // Weitere Security Headers
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
-    
-    next();
-});
-
-// ======================================================================
-// STANDARD MIDDLEWARE
-// ======================================================================
-
-// CORS Configuration
-app.use(cors({
-    origin: [
-        'https://expertise-zeigen.de', 
-        'https://www.expertise-zeigen.de'
-        // localhost ENTFERNT für Production-Sicherheit
-    ],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false
-}));
-
-app.use(express.json());
-
 // Configure multer for file uploads
 const upload = multer({ 
     storage: multer.memoryStorage(),
@@ -504,6 +472,262 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
             error: 'Routenoptimierung fehlgeschlagen',
             details: error.message,
             route: createEmptyWeekStructure(weekStart)
+        });
+    }
+});
+
+// ======================================================================
+// NEUE FUNKTION: ALLE TERMINE ÜBER MEHRERE WOCHEN OPTIMIEREN
+// ======================================================================
+app.post('/api/routes/optimize-all', validateSession, async (req, res) => {
+    const { driverId, startWeek, autoSave = true } = req.body;
+
+    if (!startWeek) {
+        return res.status(400).json({ error: 'startWeek is required' });
+    }
+
+    console.log('🌍 GESAMT-ROUTENOPTIMIERUNG: Plane ALLE verfügbaren Termine...');
+
+    try {
+        const allAppointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT * FROM appointments 
+                WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+                ORDER BY 
+                    is_fixed DESC,
+                    fixed_date ASC,
+                    CASE WHEN status = 'bestätigt' THEN 0 ELSE 1 END,
+                    pipeline_days DESC,
+                    priority DESC
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        if (allAppointments.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine Termine zum Planen gefunden',
+                totalPlanned: 0,
+                weeksPlanned: 0
+            });
+        }
+
+        console.log(`📊 ${allAppointments.length} Termine insgesamt verfügbar`);
+
+        const weekResults = [];
+        let currentWeek = startWeek;
+        let remainingAppointments = [...allAppointments];
+        let totalPlanned = 0;
+        let weekCounter = 0;
+        const maxWeeks = 52;
+
+        while (remainingAppointments.length > 0 && weekCounter < maxWeeks) {
+            console.log(`\n📅 Plane Woche ${weekCounter + 1} (${currentWeek}): ${remainingAppointments.length} Termine übrig`);
+
+            const weekStartDate = new Date(currentWeek);
+            const weekEndDate = new Date(currentWeek);
+            weekEndDate.setDate(weekEndDate.getDate() + 4);
+
+            const fixedForThisWeek = remainingAppointments.filter(apt => {
+                if (!apt.is_fixed || !apt.fixed_date) return false;
+                const aptDate = new Date(apt.fixed_date);
+                return aptDate >= weekStartDate && aptDate <= weekEndDate;
+            });
+
+            const flexibleAppointments = remainingAppointments.filter(apt =>
+                !apt.is_fixed && apt.status !== 'abgesagt'
+            );
+
+            const appointmentsForWeek = [
+                ...fixedForThisWeek,
+                ...flexibleAppointments
+            ];
+
+            if (appointmentsForWeek.length === 0) {
+                console.log('⏭️ Keine Termine mehr für diese Woche, beende Planung');
+                break;
+            }
+
+            try {
+                const planner = new IntelligentRoutePlanner();
+                const weekRoute = await planner.optimizeWeek(appointmentsForWeek, currentWeek, driverId || 1);
+
+                const plannedCount = weekRoute.stats.totalAppointments;
+
+                if (plannedCount > 0) {
+                    if (autoSave) {
+                        const routeName = `Woche ${currentWeek}: KW ${getWeekNumber(currentWeek)} (${plannedCount} Termine)`;
+                        await saveRouteToDatabase(routeName, currentWeek, driverId || 1, weekRoute);
+                    }
+
+                    const plannedIds = new Set();
+                    weekRoute.days.forEach(day => {
+                        day.appointments?.forEach(apt => {
+                            if (apt.id) plannedIds.add(apt.id);
+                        });
+                    });
+
+                    remainingAppointments = remainingAppointments.filter(apt => !plannedIds.has(apt.id));
+
+                    totalPlanned += plannedCount;
+                    weekResults.push({
+                        week: currentWeek,
+                        planned: plannedCount,
+                        route: weekRoute
+                    });
+
+                    console.log(`✅ Woche ${currentWeek}: ${plannedCount} Termine geplant`);
+                } else {
+                    console.log(`⚠️ Woche ${currentWeek}: Keine Termine konnten geplant werden`);
+                }
+
+            } catch (error) {
+                console.error(`❌ Fehler bei Woche ${currentWeek}:`, error.message);
+            }
+
+            weekCounter++;
+            const nextWeekDate = new Date(currentWeek);
+            nextWeekDate.setDate(nextWeekDate.getDate() + 7);
+            currentWeek = nextWeekDate.toISOString().split('T')[0];
+        }
+
+        const unplannableAppointments = remainingAppointments.filter(apt =>
+            apt.status !== 'abgesagt' && (!apt.on_hold || apt.on_hold.trim() === '')
+        );
+
+        console.log(`\n✅ GESAMTPLANUNG ABGESCHLOSSEN:`);
+        console.log(`   - ${totalPlanned} Termine geplant`);
+        console.log(`   - ${weekResults.length} Wochen verwendet`);
+        console.log(`   - ${unplannableAppointments.length} Termine konnten nicht geplant werden`);
+
+        res.json({
+            success: true,
+            message: `Gesamtplanung erfolgreich: ${totalPlanned} Termine über ${weekResults.length} Wochen geplant`,
+            totalPlanned: totalPlanned,
+            weeksPlanned: weekResults.length,
+            weekResults: weekResults.map(w => ({
+                week: w.week,
+                planned: w.planned
+            })),
+            unplannableAppointments: unplannableAppointments.length,
+            stats: {
+                totalAvailable: allAppointments.length,
+                confirmedPlanned: weekResults.reduce((sum, w) =>
+                    sum + (w.route.stats?.confirmedAppointments || 0), 0),
+                proposalsPlanned: weekResults.reduce((sum, w) =>
+                    sum + (w.route.stats?.proposalAppointments || 0), 0),
+                fixedPlanned: weekResults.reduce((sum, w) =>
+                    sum + (w.route.stats?.fixedAppointments || 0), 0)
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Gesamtplanung fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Gesamtplanung fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
+// ======================================================================
+// ROUTE NEU BERECHNEN (OHNE FIXE TERMINE ZU ÄNDERN)
+// ======================================================================
+app.post('/api/routes/recalculate', validateSession, async (req, res) => {
+    const { weekStart, driverId, preserveFixed = true, triggerAppointmentId } = req.body;
+
+    if (!weekStart) {
+        return res.status(400).json({ error: 'weekStart is required' });
+    }
+
+    console.log(`🔄 Neuberechnung der Route für Woche ${weekStart}...`);
+
+    try {
+        const weekStartDate = new Date(weekStart);
+        const weekEndDate = new Date(weekStart);
+        weekEndDate.setDate(weekEndDate.getDate() + 4);
+
+        const fixedAppointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT * FROM appointments 
+                WHERE is_fixed = 1 
+                AND fixed_date >= ? 
+                AND fixed_date <= ?
+                AND (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+            `, [weekStart, weekEndDate.toISOString().split('T')[0]], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        console.log(`📌 ${fixedAppointments.length} fixe Termine für diese Woche`);
+
+        const usedAppointmentIds = await getUsedAppointmentIds(weekStart);
+
+        const flexibleAppointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT * FROM appointments 
+                WHERE (is_fixed IS NULL OR is_fixed = 0)
+                AND (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+                AND status != 'abgesagt'
+                ORDER BY 
+                    CASE WHEN status = 'bestätigt' THEN 0 ELSE 1 END,
+                    pipeline_days DESC,
+                    priority DESC
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows.filter(apt => !usedAppointmentIds.includes(apt.id)));
+            });
+        });
+
+        console.log(`📋 ${flexibleAppointments.length} flexible Termine verfügbar`);
+
+        if (triggerAppointmentId) {
+            const triggerApt = await new Promise((resolve, reject) => {
+                db.get("SELECT * FROM appointments WHERE id = ?", [triggerAppointmentId],
+                    (err, row) => err ? reject(err) : resolve(row)
+                );
+            });
+
+            if (triggerApt && !flexibleAppointments.find(a => a.id === triggerAppointmentId)) {
+                flexibleAppointments.unshift(triggerApt);
+            }
+        }
+
+        const allAppointmentsForWeek = [...fixedAppointments, ...flexibleAppointments];
+
+        if (allAppointmentsForWeek.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine Termine für diese Woche verfügbar'
+            });
+        }
+
+        const planner = new IntelligentRoutePlanner();
+        const optimizedRoute = await planner.optimizeWeek(allAppointmentsForWeek, weekStart, driverId || 1);
+
+        const routeName = `Woche ${weekStart}: KW ${getWeekNumber(weekStart)} (${optimizedRoute.stats.totalAppointments} Termine) - Neuberechnet`;
+        await saveRouteToDatabase(routeName, weekStart, driverId || 1, optimizedRoute);
+
+        console.log(`✅ Route für Woche ${weekStart} neu berechnet: ${optimizedRoute.stats.totalAppointments} Termine`);
+
+        res.json({
+            success: true,
+            route: optimizedRoute,
+            message: `Route erfolgreich neu berechnet: ${optimizedRoute.stats.totalAppointments} Termine geplant`,
+            preservedFixed: preserveFixed,
+            fixedCount: fixedAppointments.length
+        });
+
+    } catch (error) {
+        console.error('❌ Neuberechnung fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Neuberechnung fehlgeschlagen',
+            details: error.message
         });
     }
 });
@@ -1434,7 +1658,7 @@ async function saveRouteToDatabase(routeName, weekStart, driverId, routeData) {
 app.get('/api/routes/saved', (req, res) => {
     const { weekStart } = req.query;
     
-    let query = "SELECT * FROM saved_routes ORDER BY created_at DESC";
+    let query = "SELECT * FROM saved_routes ORDER BY week_start ASC, created_at DESC";
     let params = [];
     
     if (weekStart) {
