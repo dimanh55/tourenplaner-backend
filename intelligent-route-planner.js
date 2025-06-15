@@ -8,16 +8,16 @@ class IntelligentRoutePlanner {
             maxWorkHoursPerWeek: 42.5,      // Max 40h Arbeit + 2.5h Pausen
             maxWorkHoursPerDay: 12,         // Arbeit + Fahrtzeit (Ende 18:00)
             flexWorkHoursPerDay: 14,        // Absolute Obergrenze mit Überstunden
-            workStartTime: 6,               // Früh starten für lange Fahrten
+            workStartTime: 9,               // Früh starten für lange Fahrten
             workEndTime: 18,                // Rückkehr bis 18 Uhr einplanen
             appointmentDuration: 3,         // 3h pro Dreh
             homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
             travelMode: 'driving',          // Immer mit dem PKW
             travelTimePadding: 0.25,        // 15 Min Fahrzeit-Puffer
-            maxTravelTimePerDay: 8,         // Bis zu 8h Fahrt pro Tag OK
-            maxSingleTravelTime: 5,         // Einzelfahrt bis 5h
-            overnightThreshold: 200,        // Übernachtung ab 200km vom Heimatort
-            minOvernightDistance: 150       // Mindestens 150km für Übernachtung
+            maxTravelTimePerDay: 9,         // Bis zu 8h Fahrt pro Tag OK
+            maxSingleTravelTime: 9,         // Einzelfahrt bis 5h
+            overnightThreshold: 100,        // Übernachtung ab 200km vom Heimatort
+            minOvernightDistance: 100       // Mindestens 150km für Übernachtung
         };
         this.distanceMatrixApiDisabled = false;
     }
