@@ -6,10 +6,10 @@ class IntelligentRoutePlanner {
         this.geocodingService = new EnhancedGeocodingService();
         this.constraints = {
             maxWorkHoursPerWeek: 50,        // Realistische 50h für Testimonials
-            maxWorkHoursPerDay: 12,         // Arbeit + Fahrtzeit (Ende 18:00)
-            flexWorkHoursPerDay: 14,        // Absolute Obergrenze mit Überstunden
+            maxWorkHoursPerDay: 14,         // Lange Tage möglich (6:00-20:00)
+            flexWorkHoursPerDay: 16,        // Extremfall: 16h (5:00-21:00)
             workStartTime: 6,               // Früh starten für lange Fahrten
-            workEndTime: 18,                // Rückkehr bis 18 Uhr einplanen
+            workEndTime: 20,                // Spät enden, aber zurück im Hotel
             appointmentDuration: 3,         // 3h pro Dreh
             homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
             travelSpeedKmh: 85,             // Realistisch mit Pausen
@@ -265,22 +265,6 @@ class IntelligentRoutePlanner {
         }
 
         console.log(`✅ Travel Matrix erstellt für ${Object.keys(matrix).length} Punkte`);
-        return this.calculateRealisticTravelTimes(matrix);
-    }
-
-    // ======================================================================
-    // REISEDATEN VALIDIEREN UND AUFBEREITEN
-    // ======================================================================
-    calculateRealisticTravelTimes(matrix) {
-        Object.keys(matrix).forEach(from => {
-            Object.keys(matrix[from]).forEach(to => {
-                const entry = matrix[from][to];
-                if (typeof entry.duration !== 'number') {
-                    const distance = entry.distance || 0;
-                    matrix[from][to].duration = distance / this.constraints.travelSpeedKmh;
-                }
-            });
-        });
         return matrix;
     }
     // ======================================================================
@@ -546,24 +530,21 @@ class IntelligentRoutePlanner {
     canReturnHomeOrStayOvernight(appointment, appointmentEnd, travelMatrix, dayIndex, week) {
         const returnHome = travelMatrix[appointment.id]?.['home'];
         if (!returnHome) return true;
-
+        
         const returnTime = appointmentEnd + returnHome.duration;
-
-        // Rückfahrt muss bis workEndTime möglich sein
-        if (returnTime <= this.constraints.workEndTime) {
+        if (returnTime <= this.constraints.workEndTime + 2) {
             return true;
         }
-
-        // Weite Strecken erlauben Übernachtung
+        
         if (returnHome.distance >= this.constraints.minOvernightDistance) {
+            console.log(`🏨 Übernachtung geplant: ${returnHome.distance.toFixed(0)}km von zu Hause`);
             return true;
         }
-
-        // Wenn am nächsten Tag frei ist, kann morgens gefahren werden
-        if (dayIndex < week.length - 1 && week[dayIndex + 1].appointments.length === 0) {
+        
+        if (dayIndex < week.length - 1) {
             return true;
         }
-
+        
         return false;
     }
 
