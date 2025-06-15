@@ -13,6 +13,8 @@ class IntelligentRoutePlanner {
             appointmentDuration: 3,         // 3h pro Dreh
             homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
             travelSpeedKmh: 85,             // Realistisch mit Pausen
+            travelMode: 'driving',         // Immer mit dem PKW unterwegs
+            travelTimePadding: 0.25,       // 15 Minuten Puffer pro Fahrt
             maxTravelTimePerDay: 8,         // Bis zu 8h Fahrt pro Tag OK
             maxSingleTravelTime: 5,         // Einzelfahrt bis 5h (400km)
             overnightThreshold: 200,        // Übernachtung ab 200km vom Heimatort
@@ -279,6 +281,7 @@ class IntelligentRoutePlanner {
                     const distance = entry.distance || 0;
                     matrix[from][to].duration = distance / this.constraints.travelSpeedKmh;
                 }
+                matrix[from][to].duration += this.constraints.travelTimePadding;
             });
         });
         return matrix;
@@ -303,7 +306,7 @@ class IntelligentRoutePlanner {
                 destinations: destinationsStr,
                 key: apiKey,
                 units: 'metric',
-                mode: 'driving',
+                mode: this.constraints.travelMode,
                 avoid: 'tolls',
                 language: 'de',
                 region: 'de'
@@ -325,7 +328,7 @@ class IntelligentRoutePlanner {
                     if (element.status === 'OK') {
                         matrix[origin.id][destination.id] = {
                             distance: element.distance.value / 1000,
-                            duration: element.duration.value / 3600
+                            duration: (element.duration.value / 3600) + this.constraints.travelTimePadding
                         };
                     } else {
                         console.warn(`❌ Element ${origin.id} → ${destination.id}: ${element.status}`);
@@ -359,8 +362,8 @@ class IntelligentRoutePlanner {
         }
         
         const distance = this.calculateHaversineDistance(from, to) * 1.3;
-        const duration = distance / this.constraints.travelSpeedKmh;
-        
+        const duration = (distance / this.constraints.travelSpeedKmh) + this.constraints.travelTimePadding;
+
         return { distance, duration };
     }
 
