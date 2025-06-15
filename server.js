@@ -806,12 +806,12 @@ function clusterAppointmentsByLocation(appointments) {
 async function planWeekWithClusters(clusters, allAppointments, weekStart) {
     const weekDays = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
     const startDate = new Date(weekStart);
-    const homeBase = { lat: 52.3759, lng: 9.7320 }; // Hannover
-    
+    const homeBase = { lat: 52.3759, lng: 9.7320, name: 'Hannover' };
+
     const week = weekDays.map((day, index) => {
         const date = new Date(startDate);
         date.setDate(startDate.getDate() + index);
-        
+
         return {
             day,
             date: date.toISOString().split('T')[0],
@@ -820,18 +820,21 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
             workTime: 0,
             travelTime: 0,
             currentLocation: homeBase,
-            overnight: null
+            overnight: null,
+            earliestStart: 6,
+            latestEnd: 20
         };
     });
-    // Verarbeite zuerst fixe Termine
+
     const fixedAppointments = allAppointments
         .filter(apt => apt.is_fixed && apt.fixed_date)
         .sort((a, b) => {
-            if (a.fixed_date === b.fixed_date) {
-                return timeToHours(a.fixed_time || '00:00') - timeToHours(b.fixed_time || '00:00');
-            }
-            return new Date(a.fixed_date) - new Date(b.fixed_date);
+            const dateCompare = new Date(a.fixed_date) - new Date(b.fixed_date);
+            if (dateCompare !== 0) return dateCompare;
+            return timeToHours(a.fixed_time || '00:00') - timeToHours(b.fixed_time || '00:00');
         });
+
+    const conflictingFixed = [];
 
     fixedAppointments.forEach(apt => {
         const dayIndex = weekDays.findIndex((_, i) => {
@@ -839,79 +842,93 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
             dayDate.setDate(startDate.getDate() + i);
             return dayDate.toISOString().split('T')[0] === apt.fixed_date;
         });
-        
+
         if (dayIndex >= 0) {
-            week[dayIndex].appointments.push({
-                ...apt,
-                startTime: apt.fixed_time || '10:00',
-                endTime: addHoursToTime(apt.fixed_time || '10:00', apt.duration || 3),
-                duration: apt.duration || 3
-            });
-            week[dayIndex].workTime += apt.duration || 3;
-            console.log(`📌 Fixer Termin geplant: ${apt.customer} am ${weekDays[dayIndex]}`);
+            const day = week[dayIndex];
+            const startTime = apt.fixed_time || '10:00';
+            const endTime = addHoursToTime(startTime, apt.duration || 3);
+
+            let hasConflict = false;
+            for (const existing of day.appointments) {
+                if (checkTimeOverlap(startTime, endTime, existing.startTime, existing.endTime)) {
+                    console.log(`⚠️ KONFLIKT: ${apt.customer} (${startTime}-${endTime}) überschneidet sich mit ${existing.customer} (${existing.startTime}-${existing.endTime})`);
+                    hasConflict = true;
+                    conflictingFixed.push({
+                        appointment: apt,
+                        conflictsWith: existing.customer,
+                        day: weekDays[dayIndex]
+                    });
+                    break;
+                }
+            }
+
+            if (!hasConflict) {
+                day.appointments.push({
+                    ...apt,
+                    startTime: startTime,
+                    endTime: endTime,
+                    duration: apt.duration || 3,
+                    isFixed: true
+                });
+                day.workTime += apt.duration || 3;
+                console.log(`📌 Fixer Termin geplant: ${apt.customer} am ${weekDays[dayIndex]} ${startTime}-${endTime}`);
+            }
         }
     });
-    
-    // Plane flexible Termine nach Regionen
+
+    if (conflictingFixed.length > 0) {
+        console.error('❌ WARNUNG: Folgende fixe Termine haben Konflikte:', conflictingFixed);
+    }
+
     const flexibleAppointments = allAppointments.filter(apt => !apt.is_fixed);
     const regionOrder = optimizeRegionOrder(clusters, homeBase);
-    
-    let currentDayIndex = 0;
-    const MAX_APPOINTMENTS_PER_DAY = 3;
-    const MAX_WORK_HOURS_PER_DAY = 12;
-    
+
     for (const region of regionOrder) {
         const regionAppointments = clusters[region]
             .filter(apt => flexibleAppointments.some(f => f.id === apt.id))
             .sort((a, b) => {
-                // Sortiere nach Status und Priorität
                 if (a.status === 'bestätigt' && b.status !== 'bestätigt') return -1;
                 if (b.status === 'bestätigt' && a.status !== 'bestätigt') return 1;
                 return b.pipeline_days - a.pipeline_days;
             });
-        
+
         if (regionAppointments.length === 0) continue;
-        
-        console.log(`\n🗺️ Plane Region ${region} mit ${regionAppointments.length} Terminen`);
-        
+
+        console.log(`\n🗺️ Plane Region ${region} mit ${regionAppointments.length} flexiblen Terminen`);
+
         for (const apt of regionAppointments) {
             let scheduled = false;
 
-            for (let dayIndex = currentDayIndex; dayIndex < 5; dayIndex++) {
+            for (let dayIndex = 0; dayIndex < 5; dayIndex++) {
                 const day = week[dayIndex];
 
-                if (day.workTime + 3 > MAX_WORK_HOURS_PER_DAY ||
-                    day.appointments.length >= MAX_APPOINTMENTS_PER_DAY) {
-                    continue;
+                day.appointments.sort((a, b) => timeToHours(a.startTime) - timeToHours(b.startTime));
+
+                const availableSlots = findAvailableSlots(day);
+
+                for (const slot of availableSlots) {
+                    if (slot.duration >= 4) {
+                        day.appointments.push({
+                            ...apt,
+                            startTime: slot.startTime,
+                            endTime: addHoursToTime(slot.startTime, 3),
+                            duration: 3,
+                            isFixed: false
+                        });
+                        day.workTime += 3;
+                        console.log(`✅ ${apt.customer} → ${weekDays[dayIndex]} ${slot.startTime}-${addHoursToTime(slot.startTime, 3)}`);
+                        scheduled = true;
+                        break;
+                    }
                 }
 
-                const lastAppointment = day.appointments[day.appointments.length - 1];
-                const startTime = lastAppointment ?
-                    addHoursToTime(lastAppointment.endTime, 1) : '09:00';
-
-                if (timeToHours(startTime) + 3 > 18) {
-                    continue;
-                }
-
-                day.appointments.push({
-                    ...apt,
-                    startTime,
-                    endTime: addHoursToTime(startTime, 3),
-                    duration: 3
-                });
-                day.workTime += 3;
-                console.log(`✅ ${apt.customer} → ${weekDays[dayIndex]} ${startTime}`);
-                currentDayIndex = dayIndex;
-                scheduled = true;
-                break;
+                if (scheduled) break;
             }
 
             if (!scheduled) {
-                console.log(`❌ ${apt.customer} passt nicht mehr in die Woche`);
+                console.log(`❌ ${apt.customer} konnte nicht eingeplant werden (keine passenden Slots)`);
             }
         }
-
-        if (currentDayIndex >= 5) break; // Woche voll
     }
 
     return week;
@@ -939,45 +956,57 @@ function optimizeRegionOrder(clusters, homeBase) {
 
 // Berechne realistische Fahrzeiten
 async function calculateRealisticTravelTimes(week) {
-    console.log('🚗 Berechne realistische Fahrzeiten...');
-    
-    const homeBase = { lat: 52.3759, lng: 9.7320 };
-    
+    console.log('🚗 Berechne realistische Fahrzeiten mit Startfahrt...');
+
+    const homeBase = { lat: 52.3759, lng: 9.7320, name: 'Hannover' };
+
     for (const day of week) {
         if (day.appointments.length === 0) continue;
-        
+
+        day.appointments.sort((a, b) => timeToHours(a.startTime) - timeToHours(b.startTime));
+
         let totalTravelTime = 0;
         let currentLocation = homeBase;
-        
-        // Fahrt zum ersten Termin
+        day.travelSegments = [];
+
         const firstApt = day.appointments[0];
         const distanceToFirst = calculateDistance(
-            currentLocation.lat, currentLocation.lng,
-            firstApt.lat, firstApt.lng
+            homeBase.lat, homeBase.lng,
+            firstApt.lat || homeBase.lat,
+            firstApt.lng || homeBase.lng
         );
-        const travelTimeToFirst = distanceToFirst / 85; // 85 km/h Durchschnitt
+        const travelTimeToFirst = Math.max(0.5, distanceToFirst / 85);
         totalTravelTime += travelTimeToFirst;
-        
+
+        const departureTime = subtractHoursFromTime(firstApt.startTime, travelTimeToFirst);
+
         day.travelSegments.push({
             type: 'departure',
             from: 'Hannover',
             to: extractCityFromAddress(firstApt.address),
             distance: Math.round(distanceToFirst),
             duration: travelTimeToFirst,
-            startTime: subtractHoursFromTime(firstApt.startTime, travelTimeToFirst),
+            startTime: departureTime,
             endTime: firstApt.startTime,
-            description: `Fahrt nach ${extractCityFromAddress(firstApt.address)}`
+            description: `🚗 Fahrt nach ${extractCityFromAddress(firstApt.address)}`
         });
-        
-        // Fahrten zwischen Terminen
+
         for (let i = 0; i < day.appointments.length - 1; i++) {
             const from = day.appointments[i];
             const to = day.appointments[i + 1];
-            
-            const distance = calculateDistance(from.lat, from.lng, to.lat, to.lng);
-            const travelTime = distance / 85;
+
+            const distance = calculateDistance(
+                from.lat || homeBase.lat, from.lng || homeBase.lng,
+                to.lat || homeBase.lat, to.lng || homeBase.lng
+            );
+            const travelTime = Math.max(0.25, distance / 85);
             totalTravelTime += travelTime;
-            
+
+            const availableTime = timeToHours(to.startTime) - timeToHours(from.endTime);
+            if (availableTime < travelTime) {
+                console.warn(`⚠️ Zu wenig Zeit zwischen ${from.customer} und ${to.customer}: ${(availableTime * 60).toFixed(0)} Min verfügbar, ${(travelTime * 60).toFixed(0)} Min benötigt`);
+            }
+
             day.travelSegments.push({
                 type: 'travel',
                 from: extractCityFromAddress(from.address),
@@ -986,29 +1015,27 @@ async function calculateRealisticTravelTimes(week) {
                 duration: travelTime,
                 startTime: from.endTime,
                 endTime: to.startTime,
-                description: `Fahrt von ${extractCityFromAddress(from.address)} nach ${extractCityFromAddress(to.address)}`
+                description: `🚗 Fahrt von ${extractCityFromAddress(from.address)} nach ${extractCityFromAddress(to.address)}`
             });
         }
-        
-        // Rückfahrt oder Übernachtung
+
         const lastApt = day.appointments[day.appointments.length - 1];
         const distanceToHome = calculateDistance(
-            lastApt.lat, lastApt.lng,
+            lastApt.lat || homeBase.lat,
+            lastApt.lng || homeBase.lng,
             homeBase.lat, homeBase.lng
         );
-        
+
         if (distanceToHome > 200) {
-            // Übernachtung nötig
             day.overnight = {
                 city: extractCityFromAddress(lastApt.address),
                 reason: `${Math.round(distanceToHome)} km von Hannover`,
-                hotel: `Hotel in ${extractCityFromAddress(lastApt.address)}`
+                hotel: `🏨 Hotel in ${extractCityFromAddress(lastApt.address)}`
             };
         } else {
-            // Rückfahrt
-            const travelTimeHome = distanceToHome / 85;
+            const travelTimeHome = Math.max(0.5, distanceToHome / 85);
             totalTravelTime += travelTimeHome;
-            
+
             day.travelSegments.push({
                 type: 'return',
                 from: extractCityFromAddress(lastApt.address),
@@ -1017,13 +1044,23 @@ async function calculateRealisticTravelTimes(week) {
                 duration: travelTimeHome,
                 startTime: lastApt.endTime,
                 endTime: addHoursToTime(lastApt.endTime, travelTimeHome),
-                description: 'Rückfahrt nach Hannover'
+                description: '🏠 Rückfahrt nach Hannover'
             });
         }
-        
+
         day.travelTime = Math.round(totalTravelTime * 10) / 10;
+
+        const dayStart = timeToHours(day.travelSegments[0].startTime);
+        const dayEnd = day.overnight ?
+            timeToHours(lastApt.endTime) :
+            timeToHours(day.travelSegments[day.travelSegments.length - 1].endTime);
+        const totalDayHours = dayEnd - dayStart;
+
+        if (totalDayHours > 14) {
+            console.warn(`⚠️ Sehr langer Tag am ${day.day}: ${totalDayHours.toFixed(1)}h (${hoursToTime(dayStart)} - ${hoursToTime(dayEnd)})`);
+        }
     }
-    
+
     return week;
 }
 
@@ -1100,6 +1137,18 @@ function subtractHoursFromTime(timeStr, hours) {
     return hoursToTime(totalHours);
 }
 
+// ======================================================================
+// FIX 1: Überlappende fixe Termine verhindern
+// ======================================================================
+function checkTimeOverlap(start1, end1, start2, end2) {
+    const s1 = timeToHours(start1);
+    const e1 = timeToHours(end1);
+    const s2 = timeToHours(start2);
+    const e2 = timeToHours(end2);
+
+    return (s1 < e2 && s2 < e1);
+}
+
 function getFallbackCoordinatesFromAddress(address) {
     const plzMatch = address.match(/\b(\d{5})\b/);
     if (!plzMatch) return null;
@@ -1118,6 +1167,61 @@ function getFallbackCoordinatesFromAddress(address) {
     };
     
     return plzMap[plz[0]] || null;
+}
+
+// ======================================================================
+// HILFSFUNKTION: Verfügbare Zeitslots finden
+// ======================================================================
+function findAvailableSlots(day) {
+    const slots = [];
+    const dayStart = day.earliestStart || 6;
+    const dayEnd = day.latestEnd || 20;
+
+    if (day.appointments.length === 0) {
+        slots.push({
+            startTime: hoursToTime(dayStart),
+            endTime: hoursToTime(dayEnd),
+            duration: dayEnd - dayStart
+        });
+        return slots;
+    }
+
+    const sortedAppts = [...day.appointments].sort((a, b) =>
+        timeToHours(a.startTime) - timeToHours(b.startTime)
+    );
+
+    const firstStart = timeToHours(sortedAppts[0].startTime);
+    if (firstStart > dayStart + 1) {
+        slots.push({
+            startTime: hoursToTime(dayStart),
+            endTime: hoursToTime(firstStart - 1),
+            duration: firstStart - 1 - dayStart
+        });
+    }
+
+    for (let i = 0; i < sortedAppts.length - 1; i++) {
+        const currentEnd = timeToHours(sortedAppts[i].endTime);
+        const nextStart = timeToHours(sortedAppts[i + 1].startTime);
+
+        if (nextStart - currentEnd > 1) {
+            slots.push({
+                startTime: hoursToTime(currentEnd + 0.5),
+                endTime: hoursToTime(nextStart - 0.5),
+                duration: nextStart - currentEnd - 1
+            });
+        }
+    }
+
+    const lastEnd = timeToHours(sortedAppts[sortedAppts.length - 1].endTime);
+    if (dayEnd - lastEnd > 1) {
+        slots.push({
+            startTime: hoursToTime(lastEnd + 0.5),
+            endTime: hoursToTime(dayEnd),
+            duration: dayEnd - lastEnd - 0.5
+        });
+    }
+
+    return slots;
 }
 
 // Formatiere das Ergebnis
@@ -2021,6 +2125,262 @@ app.post('/api/admin/fix-geocoding', validateSession, async (req, res) => {
         
     } catch (error) {
         console.error('❌ Geocoding-Reparatur fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ======================================================================
+// ADMIN: Überlappende fixe Termine finden und bereinigen
+// ======================================================================
+
+app.get('/api/admin/check-overlapping-appointments', validateSession, async (req, res) => {
+    try {
+        console.log('🔍 Prüfe auf überlappende fixe Termine...');
+
+        const fixedAppointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, fixed_date, fixed_time, duration, address, status
+                FROM appointments 
+                WHERE is_fixed = 1 AND fixed_date IS NOT NULL AND fixed_time IS NOT NULL
+                ORDER BY fixed_date, fixed_time
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        console.log(`📊 ${fixedAppointments.length} fixe Termine gefunden`);
+
+        const appointmentsByDate = {};
+        fixedAppointments.forEach(apt => {
+            if (!appointmentsByDate[apt.fixed_date]) {
+                appointmentsByDate[apt.fixed_date] = [];
+            }
+            appointmentsByDate[apt.fixed_date].push(apt);
+        });
+
+        const overlaps = [];
+
+        Object.entries(appointmentsByDate).forEach(([date, dayAppointments]) => {
+            dayAppointments.sort((a, b) =>
+                timeToHours(a.fixed_time) - timeToHours(b.fixed_time)
+            );
+
+            for (let i = 0; i < dayAppointments.length; i++) {
+                for (let j = i + 1; j < dayAppointments.length; j++) {
+                    const apt1 = dayAppointments[i];
+                    const apt2 = dayAppointments[j];
+
+                    const start1 = timeToHours(apt1.fixed_time);
+                    const end1 = start1 + (apt1.duration || 3);
+                    const start2 = timeToHours(apt2.fixed_time);
+                    const end2 = start2 + (apt2.duration || 3);
+
+                    if (start1 < end2 && start2 < end1) {
+                        overlaps.push({
+                            date: date,
+                            appointment1: {
+                                id: apt1.id,
+                                customer: apt1.customer,
+                                time: `${apt1.fixed_time} - ${hoursToTime(end1)}`,
+                                address: apt1.address
+                            },
+                            appointment2: {
+                                id: apt2.id,
+                                customer: apt2.customer,
+                                time: `${apt2.fixed_time} - ${hoursToTime(end2)}`,
+                                address: apt2.address
+                            },
+                            overlapMinutes: Math.round((Math.min(end1, end2) - Math.max(start1, start2)) * 60)
+                        });
+                    }
+                }
+            }
+        });
+
+        res.json({
+            success: true,
+            totalFixed: fixedAppointments.length,
+            overlapsFound: overlaps.length,
+            overlaps: overlaps,
+            message: overlaps.length > 0 ?
+                `⚠️ ${overlaps.length} Überlappungen gefunden!` :
+                '✅ Keine Überlappungen gefunden'
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Prüfen der Überlappungen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/admin/fix-overlapping-appointments', validateSession, async (req, res) => {
+    const { strategy = 'shift_later' } = req.body;
+    try {
+        console.log(`🔧 Bereinige Überlappungen mit Strategie: ${strategy}`);
+
+        const fixedAppointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, fixed_date, fixed_time, duration, address, status, pipeline_days
+                FROM appointments 
+                WHERE is_fixed = 1 AND fixed_date IS NOT NULL AND fixed_time IS NOT NULL
+                ORDER BY fixed_date, fixed_time
+            `, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        const appointmentsByDate = {};
+        fixedAppointments.forEach(apt => {
+            if (!appointmentsByDate[apt.fixed_date]) {
+                appointmentsByDate[apt.fixed_date] = [];
+            }
+            appointmentsByDate[apt.fixed_date].push(apt);
+        });
+
+        const fixes = [];
+
+        for (const [date, dayAppointments] of Object.entries(appointmentsByDate)) {
+            dayAppointments.sort((a, b) =>
+                timeToHours(a.fixed_time) - timeToHours(b.fixed_time)
+            );
+
+            for (let i = 0; i < dayAppointments.length - 1; i++) {
+                const current = dayAppointments[i];
+                const next = dayAppointments[i + 1];
+
+                const currentEnd = timeToHours(current.fixed_time) + (current.duration || 3);
+                const nextStart = timeToHours(next.fixed_time);
+
+                if (currentEnd > nextStart) {
+                    console.log(`⚠️ Überlappung: ${current.customer} endet ${hoursToTime(currentEnd)}, ${next.customer} startet ${next.fixed_time}`);
+
+                    if (strategy === 'shift_later') {
+                        const newTime = hoursToTime(currentEnd + 0.5);
+
+                        await new Promise((resolve, reject) => {
+                            db.run(
+                                "UPDATE appointments SET fixed_time = ? WHERE id = ?",
+                                [newTime, next.id],
+                                (err) => {
+                                    if (err) reject(err); else resolve();
+                                }
+                            );
+                        });
+
+                        fixes.push({
+                            appointment: next.customer,
+                            action: 'verschoben',
+                            oldTime: next.fixed_time,
+                            newTime: newTime,
+                            date: date
+                        });
+
+                        next.fixed_time = newTime;
+
+                    } else if (strategy === 'make_flexible') {
+                        const toMakeFlexible = current.pipeline_days < next.pipeline_days ? current : next;
+
+                        await new Promise((resolve, reject) => {
+                            db.run(
+                                "UPDATE appointments SET is_fixed = 0, fixed_date = NULL, fixed_time = NULL WHERE id = ?",
+                                [toMakeFlexible.id],
+                                (err) => {
+                                    if (err) reject(err); else resolve();
+                                }
+                            );
+                        });
+
+                        fixes.push({
+                            appointment: toMakeFlexible.customer,
+                            action: 'flexibel gemacht',
+                            oldTime: toMakeFlexible.fixed_time,
+                            date: date
+                        });
+                    }
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `${fixes.length} Überlappungen bereinigt`,
+            fixes: fixes,
+            strategy: strategy
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Bereinigen der Überlappungen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.put('/api/admin/reschedule-fixed-appointment/:id', validateSession, async (req, res) => {
+    const { id } = req.params;
+    const { fixed_date, fixed_time } = req.body;
+
+    if (!fixed_date || !fixed_time) {
+        return res.status(400).json({ error: 'fixed_date und fixed_time erforderlich' });
+    }
+
+    try {
+        const conflicts = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, fixed_time, duration
+                FROM appointments 
+                WHERE is_fixed = 1 
+                AND fixed_date = ? 
+                AND id != ?
+            `, [fixed_date, id], (err, rows) => {
+                if (err) reject(err); else resolve(rows);
+            });
+        });
+
+        const newStart = timeToHours(fixed_time);
+        const newEnd = newStart + 3;
+
+        for (const apt of conflicts) {
+            const aptStart = timeToHours(apt.fixed_time);
+            const aptEnd = aptStart + (apt.duration || 3);
+
+            if (newStart < aptEnd && aptStart < newEnd) {
+                return res.status(400).json({
+                    error: 'Zeitkonflikt',
+                    conflictsWith: apt.customer,
+                    conflictTime: `${apt.fixed_time} - ${hoursToTime(aptEnd)}`
+                });
+            }
+        }
+
+        await new Promise((resolve, reject) => {
+            db.run(
+                "UPDATE appointments SET fixed_date = ?, fixed_time = ? WHERE id = ?",
+                [fixed_date, fixed_time, id],
+                (err) => {
+                    if (err) reject(err); else resolve();
+                }
+            );
+        });
+
+        res.json({
+            success: true,
+            message: 'Termin erfolgreich verschoben',
+            newDate: fixed_date,
+            newTime: fixed_time
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Verschieben des Termins:', error);
         res.status(500).json({
             success: false,
             error: error.message
