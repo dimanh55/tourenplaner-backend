@@ -281,10 +281,7 @@ class IntelligentRoutePlanner {
                     const distance = entry.distance || 0;
                     matrix[from][to].duration = distance / this.constraints.travelSpeedKmh;
                 }
-<<<<<<< yywhvx-codex/optimierung-der-routenplanung-im-backend
                 matrix[from][to].duration += this.constraints.travelTimePadding;
-=======
->>>>>>> main
             });
         });
         return matrix;
