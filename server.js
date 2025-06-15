@@ -821,8 +821,8 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
             travelTime: 0,
             currentLocation: homeBase,
             overnight: null,
-            earliestStart: 6,
-            latestEnd: 20
+            earliestStart: index === 0 ? 9 : 6,
+            latestEnd: index === 4 ? 17 : 20
         };
     });
 
@@ -908,15 +908,34 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
 
                 for (const slot of availableSlots) {
                     if (slot.duration >= 4) {
+                        const prevApt = day.appointments[day.appointments.length - 1];
+                        const fromLat = prevApt ? prevApt.lat : homeBase.lat;
+                        const fromLng = prevApt ? prevApt.lng : homeBase.lng;
+                        const travelFromPrev = estimateTravelTime(fromLat, fromLng, apt.lat, apt.lng);
+
+                        let startTimeHours = Math.max(
+                            timeToHours(slot.startTime),
+                            prevApt ? timeToHours(prevApt.endTime) + travelFromPrev : (dayIndex === 0 ? 9 + travelFromPrev : timeToHours(slot.startTime))
+                        );
+
+                        let endTimeHours = startTimeHours + 3;
+
+                        if (endTimeHours > timeToHours(slot.endTime)) continue;
+
+                        if (dayIndex === 4) {
+                            const travelHome = estimateTravelTime(apt.lat, apt.lng, homeBase.lat, homeBase.lng);
+                            if (endTimeHours + travelHome > day.latestEnd) continue;
+                        }
+
                         day.appointments.push({
                             ...apt,
-                            startTime: slot.startTime,
-                            endTime: addHoursToTime(slot.startTime, 3),
+                            startTime: hoursToTime(startTimeHours),
+                            endTime: hoursToTime(endTimeHours),
                             duration: 3,
                             isFixed: false
                         });
                         day.workTime += 3;
-                        console.log(`✅ ${apt.customer} → ${weekDays[dayIndex]} ${slot.startTime}-${addHoursToTime(slot.startTime, 3)}`);
+                        console.log(`✅ ${apt.customer} → ${weekDays[dayIndex]} ${hoursToTime(startTimeHours)}-${hoursToTime(endTimeHours)}`);
                         scheduled = true;
                         break;
                     }
@@ -1104,6 +1123,11 @@ function calculateDistance(lat1, lng1, lat2, lng2) {
               Math.sin(dLng/2) * Math.sin(dLng/2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     return R * c;
+}
+
+function estimateTravelTime(lat1, lng1, lat2, lng2) {
+    const distance = calculateDistance(lat1, lng1, lat2, lng2);
+    return Math.max(0.25, distance / 85) + 0.25; // basic padding
 }
 
 function extractCityFromAddress(address) {
