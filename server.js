@@ -501,8 +501,15 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
             });
         }
         
-        // 4. ECHTE ROUTENOPTIMIERUNG mit maximaler Effizienz
-        const optimizedRoute = await performMaxEfficiencyOptimization(selectedAppointments, weekStart, driverId);
+        // 4. Führe echte intelligente Routenoptimierung durch
+        let optimizedRoute;
+        try {
+            const planner = new IntelligentRoutePlanner();
+            optimizedRoute = await planner.optimizeWeek(selectedAppointments, weekStart, driverId);
+        } catch (plannerError) {
+            console.warn('⚠️ Intelligente Planung fehlgeschlagen, nutze Fallback:', plannerError.message);
+            optimizedRoute = await performMaxEfficiencyOptimization(selectedAppointments, weekStart, driverId);
+        }
 
         // 5. Route speichern
         if (autoSave && optimizedRoute.stats.totalAppointments > 0) {
@@ -819,6 +826,7 @@ async function planWeekWithClusters(clusters, allAppointments, weekStart) {
             travelSegments: [],
             workTime: 0,
             travelTime: 0,
+            totalHours: 0,
             currentLocation: homeBase,
             overnight: null,
             earliestStart: index === 0 ? 9 : 6,
@@ -1076,6 +1084,9 @@ async function calculateRealisticTravelTimes(week) {
             timeToHours(day.travelSegments[day.travelSegments.length - 1].endTime);
         const totalDayHours = dayEnd - dayStart;
 
+        // Speichere die gesamte Arbeitszeit des Tages (Fahrzeit + Termine)
+        day.totalHours = parseFloat(totalDayHours.toFixed(1));
+
         if (totalDayHours > 14) {
             console.warn(`⚠️ Sehr langer Tag am ${day.day}: ${totalDayHours.toFixed(1)}h (${hoursToTime(dayStart)} - ${hoursToTime(dayEnd)})`);
         }
@@ -1255,12 +1266,13 @@ function formatOptimizedWeek(week, weekStart) {
     const totalAppointments = week.reduce((sum, day) => sum + day.appointments.length, 0);
     const totalWorkHours = week.reduce((sum, day) => sum + day.workTime, 0);
     const totalTravelHours = week.reduce((sum, day) => sum + day.travelTime, 0);
+    const totalWeekHours = week.reduce((sum, day) => sum + (day.totalHours || 0), 0);
     const workDays = week.filter(day => day.appointments.length > 0).length;
-    
+
     return {
         weekStart,
         days: week,
-        totalHours: Math.round((totalWorkHours + totalTravelHours) * 10) / 10,
+        totalHours: Math.round(totalWeekHours * 10) / 10,
         optimizations: [
             `${totalAppointments} Termine nach geografischen Clustern optimiert`,
             `${workDays} Arbeitstage effizient geplant`,
@@ -1272,13 +1284,14 @@ function formatOptimizedWeek(week, weekStart) {
         ],
         stats: {
             totalAppointments,
-            confirmedAppointments: week.reduce((sum, day) => 
+            confirmedAppointments: week.reduce((sum, day) =>
                 sum + day.appointments.filter(a => a.status === 'bestätigt').length, 0),
-            proposalAppointments: week.reduce((sum, day) => 
+            proposalAppointments: week.reduce((sum, day) =>
                 sum + day.appointments.filter(a => a.status === 'vorschlag').length, 0),
-            fixedAppointments: week.reduce((sum, day) => 
+            fixedAppointments: week.reduce((sum, day) =>
                 sum + day.appointments.filter(a => a.is_fixed).length, 0),
             totalTravelTime: Math.round(totalTravelHours * 10) / 10,
+            totalHours: Math.round(totalWeekHours * 10) / 10,
             workDays,
             efficiency: {
                 travelEfficiency: totalWorkHours > 0 ? 
@@ -1405,6 +1418,7 @@ function createEmptyWeekStructure(weekStart) {
             travelSegments: [],
             workTime: 0,
             travelTime: 0,
+            totalHours: 0,
             overnight: null
         };
     });
