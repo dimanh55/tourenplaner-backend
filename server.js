@@ -58,6 +58,7 @@ User-agent: facebookexternalhit
 Disallow: /`);
 });
 
+
 // 🛡️ Security Headers (direkt nach robots.txt)
 app.use((req, res, next) => {
     res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
@@ -85,7 +86,6 @@ app.use(cors({
 
 // JSON body parsing
 app.use(express.json());
-
 // Configure multer for file uploads
 const upload = multer({ 
     storage: multer.memoryStorage(),
