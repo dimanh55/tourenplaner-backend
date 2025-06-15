@@ -6,8 +6,8 @@ class IntelligentRoutePlanner {
         this.geocodingService = new EnhancedGeocodingService();
         this.constraints = {
             maxWorkHoursPerWeek: 42.5,      // Max 40h Arbeit + 2.5h Pausen
-            maxWorkHoursPerDay: 12,         // Arbeit + Fahrtzeit (Ende 18:00)
-            flexWorkHoursPerDay: 14,        // Absolute Obergrenze mit Überstunden
+            maxWorkHoursPerDay: 9,         // Arbeit + Fahrtzeit (Ende 18:00)
+            flexWorkHoursPerDay: 11,        // Absolute Obergrenze mit Überstunden
             workStartTime: 9,               // Früh starten für lange Fahrten
             workEndTime: 18,                // Rückkehr bis 18 Uhr einplanen
             appointmentDuration: 3,         // 3h pro Dreh
@@ -16,8 +16,8 @@ class IntelligentRoutePlanner {
             travelTimePadding: 0.25,        // 15 Min Fahrzeit-Puffer
             maxTravelTimePerDay: 9,         // Bis zu 8h Fahrt pro Tag OK
             maxSingleTravelTime: 9,         // Einzelfahrt bis 5h
-            overnightThreshold: 100,        // Übernachtung ab 200km vom Heimatort
-            minOvernightDistance: 25       // Mindestens 150km für Übernachtung
+            overnightThreshold: 100,        // Übernachtung ab 100km vom Heimatort
+            minOvernightDistance: 25       // Mindestens 25km für Übernachtung
         };
         this.distanceMatrixApiDisabled = false;
     }
