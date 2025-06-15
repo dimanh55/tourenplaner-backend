@@ -78,6 +78,11 @@ class IntelligentRoutePlanner {
                 // Kategorisierung
                 isConfirmed: apt.status === 'bestätigt',
                 isProposal: apt.status === 'vorschlag',
+                // Einige Datenbanken liefern Zahlen als Strings -> Boolean cast
+                isFixed: Boolean(apt.is_fixed),
+                fixedDate: apt.fixed_date,
+                fixedTime: apt.fixed_time,
+                duration: apt.duration || 3,
                 priority: this.calculateDynamicPriority(apt, parsedNotes),
                 // Zeitinformationen
                 preferredTimes: parsedNotes.preferred_times || [],
@@ -388,13 +393,16 @@ class IntelligentRoutePlanner {
         console.log('🚗 Starte REALISTISCHE Testimonial-Planung...');
         console.log(`📊 Akzeptiere Fahrten bis ${this.constraints.maxSingleTravelTime}h (ca. 400km)`);
         
-        const confirmedAppointments = appointments.filter(apt => apt.isConfirmed);
-        const proposalAppointments = appointments.filter(apt => apt.isProposal);
-        
-        console.log(`📅 ${confirmedAppointments.length} bestätigte + ${proposalAppointments.length} Vorschlag-Termine`);
-        
+        // Auch Termine ohne feste Uhrzeit berücksichtigen (Standard 10:00)
+        const fixedAppointments = appointments.filter(a => a.isFixed && a.fixedDate);
+        const confirmedAppointments = appointments.filter(apt => apt.isConfirmed && !apt.isFixed);
+        const proposalAppointments = appointments.filter(apt => apt.isProposal && !apt.isFixed);
+
+        console.log(`📅 ${confirmedAppointments.length} bestätigte + ${proposalAppointments.length} Vorschlag-Termine + ${fixedAppointments.length} fixe Termine`);
+
         const week = this.initializeWeek(weekStart);
-        
+
+        await this.scheduleFixedAppointments(week, fixedAppointments);
         await this.scheduleConfirmedAppointments(week, confirmedAppointments, travelMatrix);
         await this.scheduleProposalAppointments(week, proposalAppointments, travelMatrix);
         this.planOvernightStops(week, travelMatrix);
@@ -424,6 +432,51 @@ class IntelligentRoutePlanner {
                 overtime: false
             };
         });
+    }
+
+    // ======================================================================
+    // FESTE TERMINE EINPLANEN
+    // ======================================================================
+    async scheduleFixedAppointments(week, fixedAppointments) {
+        console.log('📌 Plane feste Termine...');
+
+        for (const apt of fixedAppointments) {
+            const dayIndex = week.findIndex(d => d.date === apt.fixedDate);
+            if (dayIndex === -1) {
+                console.log(`❌ Fixtermin außerhalb der Woche: ${apt.invitee_name || apt.customer} am ${apt.fixedDate}`);
+                continue;
+            }
+
+            const day = week[dayIndex];
+            const startTimeStr = apt.fixedTime || '10:00';
+            const startHours = this.timeToHours(startTimeStr);
+            const endHours = startHours + (apt.duration || this.constraints.appointmentDuration);
+
+            const conflict = day.appointments.some(a =>
+                startHours < this.timeToHours(a.endTime) && this.timeToHours(a.startTime) < endHours
+            );
+            if (conflict) {
+                console.log(`⚠️ Konflikt mit fixem Termin: ${apt.invitee_name || apt.customer} am ${day.day}`);
+                continue;
+            }
+
+            day.appointments.push({
+                ...apt,
+                startTime: startTimeStr,
+                endTime: this.formatTime(endHours),
+                travelTimeThere: 0,
+                isFixed: true,
+                customer: apt.invitee_name
+            });
+
+            day.workTime += (apt.duration || this.constraints.appointmentDuration);
+            if (endHours > day.lastAppointmentEnd) {
+                day.lastAppointmentEnd = endHours;
+                day.currentLocation = apt.id;
+            }
+
+            day.appointments.sort((a, b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime));
+        }
     }
 
     // ======================================================================
@@ -636,7 +689,8 @@ class IntelligentRoutePlanner {
             startTime: slot.time,
             endTime: this.formatTime(slot.startTime + this.constraints.appointmentDuration),
             travelTimeThere: slot.travelTime,
-            customer: appointment.invitee_name
+            customer: appointment.invitee_name,
+            isFixed: appointment.isFixed || false
         });
 
         day.workTime += this.constraints.appointmentDuration;
@@ -884,6 +938,11 @@ class IntelligentRoutePlanner {
         }
 
         return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    }
+
+    timeToHours(timeStr) {
+        const [h, m] = timeStr.split(':').map(Number);
+        return h + (m || 0) / 60;
     }
 
     // ======================================================================
