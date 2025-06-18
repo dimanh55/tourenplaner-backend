@@ -11,6 +11,8 @@ require('dotenv').config();
 // INTELLIGENTE ROUTENPLANUNG KLASSE (Aus separater Datei importiert)
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
+// Optimierte Google Maps Helper
+const { OptimizedMapsService } = require('./optimized-maps-service.js');
 const { OptimizedMapsService } = require('./optimized-maps-service');
 const OptimizedMapsService = require('./optimized-maps-service');
 
@@ -978,7 +980,6 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
     try {
         const optimizedService = new OptimizedMapsService(db);
         const optimizedService = new OptimizedMapsService();
-
         // 1. Optimiertes Geocoding (Batch + Cache)
         const geocodingResults = await optimizedService.geocodeBatch(
             appointments.map(apt => apt.address)

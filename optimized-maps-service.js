@@ -3,7 +3,6 @@
 // Ersetzt die bisherige ineffiziente Nutzung
 // ======================================================================
 
-
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
@@ -16,6 +15,7 @@ class OptimizedMapsService {
                 ? '/app/data/expertise_tours.db'
                 : './expertise_tours.db'
         );
+
 class OptimizedMapsService {
     constructor() {
         this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -523,6 +523,8 @@ class OptimizedIntelligentRoutePlanner extends IntelligentRoutePlanner {
 // ======================================================================
 // DATABASE SCHEMA ERWEITERUNG
 // ======================================================================
+
+function initializeGeocodingCache(db) {
 function initializeGeocodingCache(db) {
 function initializeGeocodingCache() {
     db.run(`CREATE TABLE IF NOT EXISTS geocoding_cache (
