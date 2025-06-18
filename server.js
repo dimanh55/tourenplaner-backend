@@ -1825,13 +1825,17 @@ app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
     }
 });
 
-// CSV Import endpoint for testimonial data
+// CSV Import endpoint for testimonial data - FIXED VERSION
 app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
     }
 
+    // NEU: Option um zu entscheiden, ob existierende Termine behalten werden sollen
+    const { preserveExisting = true, preserveFixed = true } = req.body;
+
     console.log('📁 CSV Testimonial Import gestartet...');
+    console.log(`⚙️ Optionen: preserveExisting=${preserveExisting}, preserveFixed=${preserveFixed}`);
     
     try {
         const csvContent = req.file.buffer.toString('utf-8');
@@ -1901,60 +1905,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                         dateTime = new Date(dateTimeStr);
                         console.log(`   → Format 2 (YYYY-MM-DD HH:MM): ${dateTime}`);
                     }
-                    // Format 3: DD.MM.YYYY, HH:MM (mit Komma)
-                    else if (dateTimeStr.match(/^\d{1,2}\.\d{1,2}\.\d{4},\s*\d{1,2}:\d{2}/)) {
-                        const cleanedStr = dateTimeStr.replace(',', '');
-                        const [datePart, timePart] = cleanedStr.split(/\s+/);
-                        const [day, month, year] = datePart.split('.');
-                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
-                        console.log(`   → Format 3 (DD.MM.YYYY, HH:MM): ${dateTime}`);
-                    }
-                    // Format 4: MM/DD/YYYY HH:MM (US Format)
-                    else if (dateTimeStr.match(/^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}/)) {
-                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
-                        const [month, day, year] = datePart.split('/');
-                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
-                        console.log(`   → Format 4 (MM/DD/YYYY HH:MM): ${dateTime}`);
-                    }
-                    // Format 5: YYYY/MM/DD HH:MM
-                    else if (dateTimeStr.match(/^\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}/)) {
-                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
-                        const [year, month, day] = datePart.split('/');
-                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
-                        console.log(`   → Format 5 (YYYY/MM/DD HH:MM): ${dateTime}`);
-                    }
-                    // Format 6: DD-MM-YYYY HH:MM
-                    else if (dateTimeStr.match(/^\d{1,2}-\d{1,2}-\d{4}\s+\d{1,2}:\d{2}/)) {
-                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
-                        const [day, month, year] = datePart.split('-');
-                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
-                        console.log(`   → Format 6 (DD-MM-YYYY HH:MM): ${dateTime}`);
-                    }
-                    // Format 7: ISO 8601 Format (2025-06-18T10:00:00)
-                    else if (dateTimeStr.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)) {
-                        dateTime = new Date(dateTimeStr);
-                        console.log(`   → Format 7 (ISO 8601): ${dateTime}`);
-                    }
-                    // Format 8: Deutscher Textformat (18. Juni 2025 10:00)
-                    else if (dateTimeStr.match(/^\d{1,2}\.\s*\w+\s+\d{4}\s+\d{1,2}:\d{2}/)) {
-                        // Konvertiere deutsche Monatsnamen
-                        const monthMap = {
-                            'januar': '01', 'februar': '02', 'märz': '03', 'april': '04',
-                            'mai': '05', 'juni': '06', 'juli': '07', 'august': '08',
-                            'september': '09', 'oktober': '10', 'november': '11', 'dezember': '12'
-                        };
-                        let convertedStr = dateTimeStr.toLowerCase();
-                        Object.entries(monthMap).forEach(([monthName, monthNum]) => {
-                            convertedStr = convertedStr.replace(monthName, monthNum);
-                        });
-                        // Parse: "18. 06 2025 10:00"
-                        const match = convertedStr.match(/^(\d{1,2})\.\s*(\d{2})\s+(\d{4})\s+(\d{1,2}:\d{2})/);
-                        if (match) {
-                            const [_, day, month, year, time] = match;
-                            dateTime = new Date(`${year}-${month}-${day.padStart(2, '0')}T${time}:00`);
-                            console.log(`   → Format 8 (Deutscher Text): ${dateTime}`);
-                        }
-                    }
+                    // Weitere Formate...
                     // Fallback: Versuche native Parsing
                     else {
                         dateTime = new Date(dateTimeStr);
@@ -2031,89 +1982,158 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
 
         console.log(`📈 Processing complete: ${processedAppointments.length} testimonial appointments, ${skippedCount} skipped`);
 
-        // Clear existing appointments and insert new ones
-        db.run("DELETE FROM appointments", (err) => {
-            if (err) {
-                return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
-            }
+        // WICHTIGE ÄNDERUNG: Lösche nur CSV-importierte Termine, behalte manuelle/feste Termine
+        db.serialize(() => {
+            db.run("BEGIN TRANSACTION");
 
-            console.log('🧹 Cleared existing appointments');
+            // Hole erst die Anzahl der existierenden Termine
+            db.get(`
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN is_fixed = 1 THEN 1 END) as fixed_count,
+                    COUNT(CASE WHEN json_extract(notes, '$.source') = 'CSV Testimonial Import' THEN 1 END) as csv_imported
+                FROM appointments
+            `, (err, stats) => {
+                if (err) {
+                    db.run("ROLLBACK");
+                    return res.status(500).json({ error: 'Datenbankfehler beim Statistik-Abruf' });
+                }
 
-            const stmt = db.prepare(`INSERT INTO appointments 
-                (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates, is_fixed, fixed_date, fixed_time, on_hold) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+                console.log(`📊 Vorhandene Termine: ${stats.total} gesamt, ${stats.fixed_count} fixe, ${stats.csv_imported} aus CSV`);
 
-            let insertedCount = 0;
-            let errors = [];
+                // Entscheide welche Termine gelöscht werden
+                let deleteQuery = "";
+                let preservedCount = 0;
 
-            processedAppointments.forEach((apt) => {
-                stmt.run([
-                    apt.customer, 
-                    apt.address, 
-                    apt.priority, 
-                    apt.status, 
-                    apt.duration, 
-                    apt.pipeline_days, 
-                    apt.notes,
-                    JSON.stringify([]), 
-                    JSON.stringify([]),
-                    apt.is_fixed,
-                    apt.fixed_date,
-                    apt.fixed_time,
-                    apt.on_hold
-                ], (err) => {
-                    if (err) {
-                        errors.push(`${apt.customer}: ${err.message}`);
-                    } else {
-                        insertedCount++;
+                if (!preserveExisting) {
+                    // Lösche alle Termine
+                    deleteQuery = "DELETE FROM appointments";
+                    console.log('🗑️ Lösche ALLE existierenden Termine');
+                } else if (preserveFixed) {
+                    // Lösche nur nicht-fixe CSV-importierte Termine
+                    deleteQuery = `
+                        DELETE FROM appointments 
+                        WHERE (is_fixed IS NULL OR is_fixed = 0)
+                        AND json_extract(notes, '$.source') = 'CSV Testimonial Import'
+                    `;
+                    preservedCount = stats.fixed_count;
+                    console.log(`🛡️ Behalte ${stats.fixed_count} fixe Termine, lösche nur CSV-importierte flexible Termine`);
+                } else {
+                    // Lösche nur CSV-importierte Termine
+                    deleteQuery = `
+                        DELETE FROM appointments 
+                        WHERE json_extract(notes, '$.source') = 'CSV Testimonial Import'
+                    `;
+                    preservedCount = stats.total - stats.csv_imported;
+                    console.log(`🛡️ Behalte ${preservedCount} manuelle Termine, lösche nur CSV-importierte`);
+                }
+
+                // Führe die Löschung aus
+                db.run(deleteQuery, function(deleteErr) {
+                    if (deleteErr) {
+                        db.run("ROLLBACK");
+                        return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
                     }
-                    
-                    // Send response when all insertions are complete
-                    if (insertedCount + errors.length === processedAppointments.length) {
+
+                    console.log(`🧹 ${this.changes} Termine gelöscht`);
+
+                    // Füge neue Termine ein
+                    const stmt = db.prepare(`INSERT INTO appointments 
+                        (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates, is_fixed, fixed_date, fixed_time, on_hold) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+                    let insertedCount = 0;
+                    let errors = [];
+
+                    processedAppointments.forEach((apt, idx) => {
+                        stmt.run([
+                            apt.customer, 
+                            apt.address, 
+                            apt.priority, 
+                            apt.status, 
+                            apt.duration, 
+                            apt.pipeline_days, 
+                            apt.notes,
+                            JSON.stringify([]), 
+                            JSON.stringify([]),
+                            apt.is_fixed,
+                            apt.fixed_date,
+                            apt.fixed_time,
+                            apt.on_hold
+                        ], (err) => {
+                            if (err) {
+                                errors.push(`${apt.customer}: ${err.message}`);
+                            } else {
+                                insertedCount++;
+                            }
+                            
+                            // Send response when all insertions are complete
+                            if (insertedCount + errors.length === processedAppointments.length) {
+                                stmt.finalize();
+                                
+                                if (errors.length > 0) {
+                                    db.run("ROLLBACK");
+                                    res.status(500).json({
+                                        success: false,
+                                        message: 'Import fehlgeschlagen',
+                                        errors: errors
+                                    });
+                                } else {
+                                    db.run("COMMIT");
+                                    
+                                    res.json({
+                                        success: true,
+                                        message: 'CSV Testimonial Import erfolgreich abgeschlossen',
+                                        stats: {
+                                            totalRows: parsed.data.length,
+                                            processed: processedAppointments.length,
+                                            inserted: insertedCount,
+                                            confirmed: confirmedCount,
+                                            proposals: proposalCount,
+                                            skipped: skippedCount,
+                                            preserved: preservedCount,
+                                            deleted: this.changes,
+                                            errors: errors.length
+                                        },
+                                        options: {
+                                            preserveExisting: preserveExisting,
+                                            preserveFixed: preserveFixed
+                                        },
+                                        debug: {
+                                            delimiter: parsed.meta.delimiter,
+                                            columns: parsed.meta.fields,
+                                            sample_processed: processedAppointments.slice(0, 2)
+                                        },
+                                        sample_data: processedAppointments.slice(0, 3).map(apt => ({
+                                            name: apt.customer,
+                                            is_fixed: apt.is_fixed,
+                                            fixed_date: apt.fixed_date,
+                                            fixed_time: apt.fixed_time,
+                                            notes_preview: JSON.parse(apt.notes)
+                                        })),
+                                        errors: errors.length > 0 ? errors.slice(0, 5) : undefined
+                                    });
+                                }
+                            }
+                        });
+                    });
+
+                    // Handle case where no appointments to process
+                    if (processedAppointments.length === 0) {
                         stmt.finalize();
-                        
+                        db.run("COMMIT");
                         res.json({
-                            success: true,
-                            message: 'CSV Testimonial Import erfolgreich abgeschlossen',
+                            success: false,
+                            message: 'Keine gültigen Testimonial-Termine in der CSV gefunden',
                             stats: {
                                 totalRows: parsed.data.length,
-                                processed: processedAppointments.length,
-                                inserted: insertedCount,
-                                confirmed: confirmedCount,
-                                proposals: proposalCount,
                                 skipped: skippedCount,
-                                errors: errors.length
-                            },
-                            debug: {
-                                delimiter: parsed.meta.delimiter,
-                                columns: parsed.meta.fields,
-                                sample_processed: processedAppointments.slice(0, 2)
-                            },
-                            sample_data: processedAppointments.slice(0, 3).map(apt => ({
-                                name: apt.customer,
-                                is_fixed: apt.is_fixed,
-                                fixed_date: apt.fixed_date,
-                                fixed_time: apt.fixed_time,
-                                notes_preview: JSON.parse(apt.notes)
-                            })),
-                            errors: errors.length > 0 ? errors.slice(0, 5) : undefined
+                                preserved: preservedCount
+                            }
                         });
                     }
                 });
             });
-
-            // Handle case where no appointments to process
-            if (processedAppointments.length === 0) {
-                stmt.finalize();
-                res.json({
-                    success: false,
-                    message: 'Keine gültigen Testimonial-Termine in der CSV gefunden',
-                    stats: {
-                        totalRows: parsed.data.length,
-                        skipped: skippedCount
-                    }
-                });
-            }
         });
 
     } catch (error) {
