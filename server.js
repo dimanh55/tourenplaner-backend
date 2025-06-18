@@ -12,8 +12,6 @@ require('dotenv').config();
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
 
-// FIX: Nur EINEN Import für OptimizedMapsService
-const { OptimizedMapsService } = require('./optimized-maps-service');
 
 // Debug: Umgebungsvariablen prüfen
 console.log('🔍 Environment Variables Debug:');
@@ -974,59 +972,28 @@ async function selectMaxAppointmentsForWeek(allAppointments, weekStart) {
 // ======================================================================
 
 async function performMaxEfficiencyOptimization(appointments, weekStart, driverId) {
-    console.log('⚡ OPTIMIERTE Routenplanung mit minimalem API-Verbrauch...');
+    console.log('⚡ Standard Routenplanung (ohne Optimized Service)...');
 
     try {
-        const optimizedService = new OptimizedMapsService(db);
-        const optimizedService = new OptimizedMapsService();
-        // 1. Optimiertes Geocoding (Batch + Cache)
-        const geocodingResults = await optimizedService.geocodeBatch(
-            appointments.map(apt => apt.address)
-        );
-
-        // 2. Merge Geocoding-Ergebnisse
-        const geocodedAppointments = appointments.map((apt, index) => {
-            const result = geocodingResults[index];
-            if (result && !result.error) {
-                return {
-                    ...apt,
-                    lat: result.lat,
-                    lng: result.lng,
-                    geocoded: true
-                };
-            }
-            return apt;
-        }).filter(apt => apt.lat && apt.lng);
-
-        console.log(`✅ ${geocodedAppointments.length} Termine geocoded`);
-
-        // 3. Optimierte Distance Matrix
-        const travelMatrix = await optimizedService.calculateOptimizedDistanceMatrix(
-            geocodedAppointments
-        );
-
-        // 4. Standard-Routenplanung mit optimierten Daten
+        // Verwende Standard IntelligentRoutePlanner statt OptimizedMapsService
         const planner = new IntelligentRoutePlanner();
-        const weekPlan = await planner.planOptimalWeek(
-            geocodedAppointments,
-            travelMatrix,
-            weekStart
-        );
-
-        // 5. API-Verbrauch protokollieren
-        const stats = optimizedService.getRequestStats();
-        console.log('📊 API-Verbrauch:', stats);
+        const optimizedRoute = await planner.optimizeWeek(appointments, weekStart, driverId || 1);
 
         return {
-            ...planner.formatWeekResult(weekPlan, travelMatrix),
-            api_usage: stats,
-            optimization: 'api_optimized'
+            ...optimizedRoute,
+            optimization: 'standard_planner',
+            api_usage: {
+                geocoding_requests: 0,
+                distance_matrix_requests: 0,
+                cache_hits: 0,
+                estimated_cost_usd: 0,
+                note: 'Using standard planner instead of optimized service'
+            }
         };
 
     } catch (error) {
-        console.error('❌ Optimierte Planung fehlgeschlagen:', error);
-        const planner = new IntelligentRoutePlanner();
-        return await planner.optimizeWeek(appointments, weekStart, driverId || 1);
+        console.error('❌ Standard Planung fehlgeschlagen:', error);
+        throw error;
     }
 }
 
@@ -2334,25 +2301,8 @@ app.post('/api/admin/import-csv-optimized', upload.single('csvFile'), async (req
 
         console.log(`📊 ${processedAppointments.length} Termine verarbeitet`);
 
-        const optimizedService = new OptimizedMapsService(db);
-        const optimizedService = new OptimizedMapsService();
-        const addresses = processedAppointments.map(apt => apt.address);
-
-        console.log('🗺️ Starte optimiertes Batch-Geocoding...');
-        const geocodingResults = await optimizedService.geocodeBatch(addresses);
-
-        processedAppointments.forEach((apt, index) => {
-            const result = geocodingResults[index];
-            if (result && !result.error) {
-                apt.lat = result.lat;
-                apt.lng = result.lng;
-                apt.geocoded = 1;
-            } else {
-                apt.lat = null;
-                apt.lng = null;
-                apt.geocoded = 0;
-            }
-        });
+        // Standard Geocoding ohne Optimized Service
+        await ensureAllAppointmentsGeocoded(processedAppointments);
 
         const geocodedCount = processedAppointments.filter(apt => apt.geocoded).length;
         console.log(`✅ ${geocodedCount}/${processedAppointments.length} Termine geocoded`);
@@ -2413,32 +2363,17 @@ app.post('/api/admin/import-csv-optimized', upload.single('csvFile'), async (req
                                             error: 'Commit fehlgeschlagen'
                                         });
                                     } else {
-                                        const apiStats = optimizedService.getRequestStats();
-
-                                        console.log('✅ OPTIMIERTER CSV Import erfolgreich!');
-                                        console.log('📊 API-Verbrauch:', apiStats);
+                                        console.log('✅ CSV Import erfolgreich!');
 
                                         res.json({
                                             success: true,
-                                            message: '✅ OPTIMIERTER CSV Import erfolgreich',
+                                            message: '✅ CSV Import erfolgreich',
                                             stats: {
                                                 totalRows: parsed.data.length,
                                                 processed: processedAppointments.length,
                                                 inserted: insertedCount,
                                                 geocoded: geocodedCount,
                                                 skipped: skippedCount
-                                            },
-                                            api_usage: apiStats,
-                                            optimization: {
-                                                previous_estimated: {
-                                                    geocoding_requests: processedAppointments.length,
-                                                    distance_matrix_requests: Math.pow(processedAppointments.length, 2) / 25
-                                                },
-                                                actual: apiStats,
-                                                savings: {
-                                                    geocoding_requests_saved: Math.max(0, processedAppointments.length - apiStats.geocoding_requests),
-                                                    estimated_cost_savings_usd: Math.max(0, (processedAppointments.length * 0.005) - apiStats.estimated_cost_usd)
-                                                }
                                             },
                                             timestamp: new Date().toISOString()
                                         });
