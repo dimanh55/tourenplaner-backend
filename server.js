@@ -1825,18 +1825,19 @@ app.post('/api/admin/preview-csv', upload.single('csvFile'), (req, res) => {
     }
 });
 
-// CSV Import endpoint for testimonial data - FIXED VERSION
+// ======================================================================
+// VEREINFACHTE CSV IMPORT FUNKTION - VOLLSTÄNDIGER ERSATZ
+// Ersetzt die komplexe Logik in server.js ab Zeile ~1400
+// ======================================================================
+
+// CSV Import endpoint for testimonial data - SIMPLIFIED VERSION
 app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
     }
 
-    // NEU: Option um zu entscheiden, ob existierende Termine behalten werden sollen
-    const { preserveExisting = true, preserveFixed = true } = req.body;
+    console.log('📁 CSV Testimonial Import gestartet - VOLLSTÄNDIGER ERSATZ...');
 
-    console.log('📁 CSV Testimonial Import gestartet...');
-    console.log(`⚙️ Optionen: preserveExisting=${preserveExisting}, preserveFixed=${preserveFixed}`);
-    
     try {
         const csvContent = req.file.buffer.toString('utf-8');
         
@@ -1849,7 +1850,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
             delimitersToGuess: [',', ';', '\t', '|']
         });
 
-        console.log(`📊 ${parsed.data.length} Zeilen gefunden`);
+        console.log(`📊 ${parsed.data.length} Zeilen in CSV gefunden`);
 
         const processedAppointments = [];
         let skippedCount = 0;
@@ -1859,12 +1860,14 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
         parsed.data.forEach((row, index) => {
             // Skip if "On Hold" is filled
             if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                console.log(`⏭️ Zeile ${index + 1}: Übersprungen (On Hold: ${row['On Hold']})`);
                 skippedCount++;
                 return;
             }
 
             // Skip if essential data missing
             if (!row['Invitee Name'] || row['Invitee Name'].trim() === '') {
+                console.log(`⏭️ Zeile ${index + 1}: Übersprungen (Kein Invitee Name)`);
                 skippedCount++;
                 return;
             }
@@ -1890,7 +1893,6 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                     const dateTimeStr = row['Start Date & Time'].trim();
                     let dateTime;
 
-                    // Erweiterte Datumsformat-Erkennung
                     console.log(`📅 Parsing date: "${dateTimeStr}"`);
 
                     // Format 1: DD.MM.YYYY HH:MM oder DD/MM/YYYY HH:MM
@@ -1898,34 +1900,25 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                         const [datePart, timePart] = dateTimeStr.split(/\s+/);
                         const [day, month, year] = datePart.split(/[\.\/]/);
                         dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
-                        console.log(`   → Format 1 (DD.MM.YYYY HH:MM): ${dateTime}`);
                     }
                     // Format 2: YYYY-MM-DD HH:MM
                     else if (dateTimeStr.match(/^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
                         dateTime = new Date(dateTimeStr);
-                        console.log(`   → Format 2 (YYYY-MM-DD HH:MM): ${dateTime}`);
                     }
-                    // Weitere Formate...
                     // Fallback: Versuche native Parsing
                     else {
                         dateTime = new Date(dateTimeStr);
-                        console.log(`   → Fallback (native parsing): ${dateTime}`);
                     }
 
                     // Validierung des geparsten Datums
                     if (!isNaN(dateTime.getTime())) {
-                        // Prüfe ob das Datum plausibel ist (2020-2030)
                         const year = dateTime.getFullYear();
                         if (year >= 2020 && year <= 2030) {
                             isFixed = true;
                             fixedDate = dateTime.toISOString().split('T')[0];
                             fixedTime = `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`;
-                            console.log(`   ✅ Erfolgreich geparst: ${fixedDate} ${fixedTime}`);
-                        } else {
-                            console.log(`   ⚠️ Datum außerhalb des gültigen Bereichs (2020-2030): ${year}`);
+                            console.log(`   ✅ Fixer Termin geparst: ${fixedDate} ${fixedTime}`);
                         }
-                    } else {
-                        console.log(`   ❌ Konnte Datum nicht parsen`);
                     }
                 } catch (e) {
                     console.log(`❌ Date parsing error for "${row['Start Date & Time']}":`, e.message);
@@ -1941,6 +1934,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
             const company = row['Company'] ? row['Company'].trim() : '';
             const customerCompany = row['Customer Company'] ? row['Customer Company'].trim() : '';
 
+            // Priorität basierend auf Status und Kunde
             let priority = 'mittel';
             if (status === 'bestätigt') {
                 priority = 'hoch';
@@ -1952,19 +1946,17 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                 priority = 'hoch';
             }
 
-            const duration = 3;
-
             const appointment = {
                 customer: inviteeName,
                 address: fullAddress || 'Adresse nicht verfügbar',
                 priority: priority,
                 status: status,
-                duration: duration,
+                duration: 3,
                 pipeline_days: status === 'vorschlag' ? Math.floor(Math.random() * 30) + 1 : 7,
                 is_fixed: isFixed ? 1 : 0,
                 fixed_date: fixedDate,
                 fixed_time: fixedTime,
-                on_hold: row['On Hold'] || null,
+                on_hold: null, // Explizit auf null setzen
                 notes: JSON.stringify({
                     invitee_name: inviteeName,
                     company: company,
@@ -1978,172 +1970,159 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
             };
 
             processedAppointments.push(appointment);
+            console.log(`✅ Verarbeitet: ${inviteeName} (${status}${isFixed ? ', FIX' : ''})`);
         });
 
-        console.log(`📈 Processing complete: ${processedAppointments.length} testimonial appointments, ${skippedCount} skipped`);
+        console.log(`📈 Verarbeitung abgeschlossen:`);
+        console.log(`   - ${processedAppointments.length} Termine verarbeitet`);
+        console.log(`   - ${confirmedCount} bestätigte Termine (fix)`);
+        console.log(`   - ${proposalCount} Vorschlag-Termine (flexibel)`);
+        console.log(`   - ${skippedCount} übersprungen`);
 
-        // WICHTIGE ÄNDERUNG: Lösche nur CSV-importierte Termine, behalte manuelle/feste Termine
+        if (processedAppointments.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine gültigen Termine in der CSV gefunden',
+                stats: {
+                    totalRows: parsed.data.length,
+                    processed: 0,
+                    skipped: skippedCount
+                }
+            });
+        }
+
+        // ======================================================================
+        // VEREINFACHTE ERSETZUNG: LÖSCHE ALLE, FÜGE NEUE EIN
+        // ======================================================================
+        
         db.serialize(() => {
+            console.log('🗃️ Starte Datenbank-Transaction...');
             db.run("BEGIN TRANSACTION");
 
-            // Hole erst die Anzahl der existierenden Termine
-            db.get(`
-                SELECT 
-                    COUNT(*) as total,
-                    COUNT(CASE WHEN is_fixed = 1 THEN 1 END) as fixed_count,
-                    COUNT(CASE WHEN json_extract(notes, '$.source') = 'CSV Testimonial Import' THEN 1 END) as csv_imported
-                FROM appointments
-            `, (err, stats) => {
-                if (err) {
+            // 1. ALLE bestehenden Termine löschen
+            db.run("DELETE FROM appointments", function(deleteErr) {
+                if (deleteErr) {
+                    console.error('❌ Fehler beim Löschen bestehender Termine:', deleteErr);
                     db.run("ROLLBACK");
-                    return res.status(500).json({ error: 'Datenbankfehler beim Statistik-Abruf' });
-                }
-
-                console.log(`📊 Vorhandene Termine: ${stats.total} gesamt, ${stats.fixed_count} fixe, ${stats.csv_imported} aus CSV`);
-
-                // Entscheide welche Termine gelöscht werden
-                let deleteQuery = "";
-                let preservedCount = 0;
-
-                if (!preserveExisting) {
-                    // Lösche alle Termine
-                    deleteQuery = "DELETE FROM appointments";
-                    console.log('🗑️ Lösche ALLE existierenden Termine');
-                } else if (preserveFixed) {
-                    // Lösche nur nicht-fixe CSV-importierte Termine
-                    deleteQuery = `
-                        DELETE FROM appointments 
-                        WHERE (is_fixed IS NULL OR is_fixed = 0)
-                        AND json_extract(notes, '$.source') = 'CSV Testimonial Import'
-                    `;
-                    preservedCount = stats.fixed_count;
-                    console.log(`🛡️ Behalte ${stats.fixed_count} fixe Termine, lösche nur CSV-importierte flexible Termine`);
-                } else {
-                    // Lösche nur CSV-importierte Termine
-                    deleteQuery = `
-                        DELETE FROM appointments 
-                        WHERE json_extract(notes, '$.source') = 'CSV Testimonial Import'
-                    `;
-                    preservedCount = stats.total - stats.csv_imported;
-                    console.log(`🛡️ Behalte ${preservedCount} manuelle Termine, lösche nur CSV-importierte`);
-                }
-
-                // Führe die Löschung aus
-                db.run(deleteQuery, function(deleteErr) {
-                    if (deleteErr) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({ error: 'Datenbankfehler beim Löschen' });
-                    }
-
-                    console.log(`🧹 ${this.changes} Termine gelöscht`);
-
-                    // Füge neue Termine ein
-                    const stmt = db.prepare(`INSERT INTO appointments 
-                        (customer, address, priority, status, duration, pipeline_days, notes, preferred_dates, excluded_dates, is_fixed, fixed_date, fixed_time, on_hold) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-
-                    let insertedCount = 0;
-                    let errors = [];
-
-                    processedAppointments.forEach((apt, idx) => {
-                        stmt.run([
-                            apt.customer, 
-                            apt.address, 
-                            apt.priority, 
-                            apt.status, 
-                            apt.duration, 
-                            apt.pipeline_days, 
-                            apt.notes,
-                            JSON.stringify([]), 
-                            JSON.stringify([]),
-                            apt.is_fixed,
-                            apt.fixed_date,
-                            apt.fixed_time,
-                            apt.on_hold
-                        ], (err) => {
-                            if (err) {
-                                errors.push(`${apt.customer}: ${err.message}`);
-                            } else {
-                                insertedCount++;
-                            }
-                            
-                            // Send response when all insertions are complete
-                            if (insertedCount + errors.length === processedAppointments.length) {
-                                stmt.finalize();
-                                
-                                if (errors.length > 0) {
-                                    db.run("ROLLBACK");
-                                    res.status(500).json({
-                                        success: false,
-                                        message: 'Import fehlgeschlagen',
-                                        errors: errors
-                                    });
-                                } else {
-                                    db.run("COMMIT");
-                                    
-                                    res.json({
-                                        success: true,
-                                        message: 'CSV Testimonial Import erfolgreich abgeschlossen',
-                                        stats: {
-                                            totalRows: parsed.data.length,
-                                            processed: processedAppointments.length,
-                                            inserted: insertedCount,
-                                            confirmed: confirmedCount,
-                                            proposals: proposalCount,
-                                            skipped: skippedCount,
-                                            preserved: preservedCount,
-                                            deleted: this.changes,
-                                            errors: errors.length
-                                        },
-                                        options: {
-                                            preserveExisting: preserveExisting,
-                                            preserveFixed: preserveFixed
-                                        },
-                                        debug: {
-                                            delimiter: parsed.meta.delimiter,
-                                            columns: parsed.meta.fields,
-                                            sample_processed: processedAppointments.slice(0, 2)
-                                        },
-                                        sample_data: processedAppointments.slice(0, 3).map(apt => ({
-                                            name: apt.customer,
-                                            is_fixed: apt.is_fixed,
-                                            fixed_date: apt.fixed_date,
-                                            fixed_time: apt.fixed_time,
-                                            notes_preview: JSON.parse(apt.notes)
-                                        })),
-                                        errors: errors.length > 0 ? errors.slice(0, 5) : undefined
-                                    });
-                                }
-                            }
-                        });
+                    return res.status(500).json({ 
+                        success: false,
+                        error: 'Fehler beim Löschen bestehender Termine',
+                        details: deleteErr.message
                     });
+                }
 
-                    // Handle case where no appointments to process
-                    if (processedAppointments.length === 0) {
-                        stmt.finalize();
-                        db.run("COMMIT");
-                        res.json({
-                            success: false,
-                            message: 'Keine gültigen Testimonial-Termine in der CSV gefunden',
-                            stats: {
-                                totalRows: parsed.data.length,
-                                skipped: skippedCount,
-                                preserved: preservedCount
+                console.log(`🧹 ${this.changes} bestehende Termine gelöscht`);
+
+                // 2. Neue Termine einfügen
+                const stmt = db.prepare(`
+                    INSERT INTO appointments 
+                    (customer, address, priority, status, duration, pipeline_days, notes, 
+                     preferred_dates, excluded_dates, is_fixed, fixed_date, fixed_time, on_hold,
+                     lat, lng, geocoded) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
+                `);
+
+                let insertedCount = 0;
+                let insertErrors = [];
+
+                processedAppointments.forEach((apt, idx) => {
+                    stmt.run([
+                        apt.customer, 
+                        apt.address, 
+                        apt.priority, 
+                        apt.status, 
+                        apt.duration, 
+                        apt.pipeline_days, 
+                        apt.notes,
+                        JSON.stringify([]), // preferred_dates
+                        JSON.stringify([]), // excluded_dates
+                        apt.is_fixed,
+                        apt.fixed_date,
+                        apt.fixed_time,
+                        apt.on_hold
+                    ], function(err) {
+                        if (err) {
+                            console.error(`❌ Insert-Fehler für ${apt.customer}:`, err.message);
+                            insertErrors.push(`${apt.customer}: ${err.message}`);
+                        } else {
+                            insertedCount++;
+                            console.log(`✅ Eingefügt: ${apt.customer} (ID: ${this.lastID})`);
+                        }
+                        
+                        // Wenn alle Termine verarbeitet wurden
+                        if (insertedCount + insertErrors.length === processedAppointments.length) {
+                            stmt.finalize();
+                            
+                            if (insertErrors.length > 0) {
+                                console.error(`❌ ${insertErrors.length} Insert-Fehler aufgetreten`);
+                                db.run("ROLLBACK");
+                                res.status(500).json({
+                                    success: false,
+                                    message: 'Import teilweise fehlgeschlagen',
+                                    inserted: insertedCount,
+                                    errors: insertErrors.slice(0, 10)
+                                });
+                            } else {
+                                console.log('💾 Alle Termine erfolgreich eingefügt, committe Transaction...');
+                                db.run("COMMIT", (commitErr) => {
+                                    if (commitErr) {
+                                        console.error('❌ Commit-Fehler:', commitErr);
+                                        res.status(500).json({
+                                            success: false,
+                                            error: 'Commit fehlgeschlagen',
+                                            details: commitErr.message
+                                        });
+                                    } else {
+                                        console.log('✅ CSV Import erfolgreich abgeschlossen!');
+                                        
+                                        res.json({
+                                            success: true,
+                                            message: '✅ CSV Import erfolgreich - Alle Termine ersetzt',
+                                            action: 'VOLLSTÄNDIGER ERSATZ',
+                                            stats: {
+                                                totalRows: parsed.data.length,
+                                                processed: processedAppointments.length,
+                                                inserted: insertedCount,
+                                                confirmed: confirmedCount,
+                                                proposals: proposalCount,
+                                                skipped: skippedCount,
+                                                deleted: this.changes, // Anzahl gelöschter Termine
+                                                errors: insertErrors.length
+                                            },
+                                            import_info: {
+                                                fixed_appointments: confirmedCount,
+                                                flexible_appointments: proposalCount,
+                                                delimiter: parsed.meta.delimiter,
+                                                columns: parsed.meta.fields
+                                            },
+                                            sample_data: processedAppointments.slice(0, 3).map(apt => ({
+                                                name: apt.customer,
+                                                is_fixed: apt.is_fixed,
+                                                fixed_date: apt.fixed_date,
+                                                fixed_time: apt.fixed_time,
+                                                status: apt.status
+                                            })),
+                                            timestamp: new Date().toISOString()
+                                        });
+                                    }
+                                });
                             }
-                        });
-                    }
+                        }
+                    });
                 });
             });
         });
-
     } catch (error) {
-        console.error('❌ CSV Testimonial Import Fehler:', error);
+        console.error('❌ CSV Import Fehler:', error);
         res.status(500).json({
-            error: 'CSV Testimonial Import fehlgeschlagen',
+            success: false,
+            error: 'CSV Import fehlgeschlagen',
             details: error.message
         });
     }
 });
+
+console.log('📝 CSV Import Funktion vereinfacht - VOLLSTÄNDIGER ERSATZ aktiv');
 
 // Admin endpoint to check database
 app.get('/api/admin/status', (req, res) => {
