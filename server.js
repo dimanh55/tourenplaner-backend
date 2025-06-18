@@ -474,8 +474,13 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
             const planner = new IntelligentRoutePlanner();
             optimizedRoute = await planner.optimizeWeek(selectedAppointments, weekStart, driverId);
         } catch (plannerError) {
-            console.warn('⚠️ Intelligente Planung fehlgeschlagen, nutze Fallback:', plannerError.message);
-            optimizedRoute = await performMaxEfficiencyOptimization(selectedAppointments, weekStart, driverId);
+            console.error('❌ Intelligente Planung fehlgeschlagen:', plannerError.message);
+            return res.status(500).json({
+                success: false,
+                error: 'Routenoptimierung fehlgeschlagen',
+                details: plannerError.message,
+                route: createEmptyWeekStructure(weekStart)
+            });
         }
 
         // 5. Route speichern
