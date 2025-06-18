@@ -1880,29 +1880,104 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
             let isFixed = false;
             let fixedDate = null;
             let fixedTime = null;
-            
+
             if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
                 try {
                     const dateTimeStr = row['Start Date & Time'].trim();
                     let dateTime;
-                    
-                    if (dateTimeStr.match(/\d{1,2}[\.\/]\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}/)) {
+
+                    // Erweiterte Datumsformat-Erkennung
+                    console.log(`📅 Parsing date: "${dateTimeStr}"`);
+
+                    // Format 1: DD.MM.YYYY HH:MM oder DD/MM/YYYY HH:MM
+                    if (dateTimeStr.match(/^\d{1,2}[\.\/]\d{1,2}[\.\/]\d{4}\s+\d{1,2}:\d{2}/)) {
                         const [datePart, timePart] = dateTimeStr.split(/\s+/);
                         const [day, month, year] = datePart.split(/[\.\/]/);
                         dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
-                    } else if (dateTimeStr.match(/\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
-                        dateTime = new Date(dateTimeStr);
-                    } else {
-                        dateTime = new Date(dateTimeStr);
+                        console.log(`   → Format 1 (DD.MM.YYYY HH:MM): ${dateTime}`);
                     }
-                    
+                    // Format 2: YYYY-MM-DD HH:MM
+                    else if (dateTimeStr.match(/^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                        dateTime = new Date(dateTimeStr);
+                        console.log(`   → Format 2 (YYYY-MM-DD HH:MM): ${dateTime}`);
+                    }
+                    // Format 3: DD.MM.YYYY, HH:MM (mit Komma)
+                    else if (dateTimeStr.match(/^\d{1,2}\.\d{1,2}\.\d{4},\s*\d{1,2}:\d{2}/)) {
+                        const cleanedStr = dateTimeStr.replace(',', '');
+                        const [datePart, timePart] = cleanedStr.split(/\s+/);
+                        const [day, month, year] = datePart.split('.');
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                        console.log(`   → Format 3 (DD.MM.YYYY, HH:MM): ${dateTime}`);
+                    }
+                    // Format 4: MM/DD/YYYY HH:MM (US Format)
+                    else if (dateTimeStr.match(/^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}/)) {
+                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+                        const [month, day, year] = datePart.split('/');
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                        console.log(`   → Format 4 (MM/DD/YYYY HH:MM): ${dateTime}`);
+                    }
+                    // Format 5: YYYY/MM/DD HH:MM
+                    else if (dateTimeStr.match(/^\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+                        const [year, month, day] = datePart.split('/');
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                        console.log(`   → Format 5 (YYYY/MM/DD HH:MM): ${dateTime}`);
+                    }
+                    // Format 6: DD-MM-YYYY HH:MM
+                    else if (dateTimeStr.match(/^\d{1,2}-\d{1,2}-\d{4}\s+\d{1,2}:\d{2}/)) {
+                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+                        const [day, month, year] = datePart.split('-');
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                        console.log(`   → Format 6 (DD-MM-YYYY HH:MM): ${dateTime}`);
+                    }
+                    // Format 7: ISO 8601 Format (2025-06-18T10:00:00)
+                    else if (dateTimeStr.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)) {
+                        dateTime = new Date(dateTimeStr);
+                        console.log(`   → Format 7 (ISO 8601): ${dateTime}`);
+                    }
+                    // Format 8: Deutscher Textformat (18. Juni 2025 10:00)
+                    else if (dateTimeStr.match(/^\d{1,2}\.\s*\w+\s+\d{4}\s+\d{1,2}:\d{2}/)) {
+                        // Konvertiere deutsche Monatsnamen
+                        const monthMap = {
+                            'januar': '01', 'februar': '02', 'märz': '03', 'april': '04',
+                            'mai': '05', 'juni': '06', 'juli': '07', 'august': '08',
+                            'september': '09', 'oktober': '10', 'november': '11', 'dezember': '12'
+                        };
+                        let convertedStr = dateTimeStr.toLowerCase();
+                        Object.entries(monthMap).forEach(([monthName, monthNum]) => {
+                            convertedStr = convertedStr.replace(monthName, monthNum);
+                        });
+                        // Parse: "18. 06 2025 10:00"
+                        const match = convertedStr.match(/^(\d{1,2})\.\s*(\d{2})\s+(\d{4})\s+(\d{1,2}:\d{2})/);
+                        if (match) {
+                            const [_, day, month, year, time] = match;
+                            dateTime = new Date(`${year}-${month}-${day.padStart(2, '0')}T${time}:00`);
+                            console.log(`   → Format 8 (Deutscher Text): ${dateTime}`);
+                        }
+                    }
+                    // Fallback: Versuche native Parsing
+                    else {
+                        dateTime = new Date(dateTimeStr);
+                        console.log(`   → Fallback (native parsing): ${dateTime}`);
+                    }
+
+                    // Validierung des geparsten Datums
                     if (!isNaN(dateTime.getTime())) {
-                        isFixed = true;
-                        fixedDate = dateTime.toISOString().split('T')[0];
-                        fixedTime = `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`;
+                        // Prüfe ob das Datum plausibel ist (2020-2030)
+                        const year = dateTime.getFullYear();
+                        if (year >= 2020 && year <= 2030) {
+                            isFixed = true;
+                            fixedDate = dateTime.toISOString().split('T')[0];
+                            fixedTime = `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`;
+                            console.log(`   ✅ Erfolgreich geparst: ${fixedDate} ${fixedTime}`);
+                        } else {
+                            console.log(`   ⚠️ Datum außerhalb des gültigen Bereichs (2020-2030): ${year}`);
+                        }
+                    } else {
+                        console.log(`   ❌ Konnte Datum nicht parsen`);
                     }
                 } catch (e) {
-                    console.log(`❌ Date parsing failed for: ${row['Start Date & Time']}`);
+                    console.log(`❌ Date parsing error for "${row['Start Date & Time']}":`, e.message);
                 }
             }
 
