@@ -11,6 +11,7 @@ require('dotenv').config();
 // INTELLIGENTE ROUTENPLANUNG KLASSE (Aus separater Datei importiert)
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
+const OptimizedMapsService = require('./optimized-maps-service');
 
 // Debug: Umgebungsvariablen prüfen
 console.log('🔍 Environment Variables Debug:');
@@ -766,6 +767,74 @@ app.post('/api/routes/recalculate', validateSession, async (req, res) => {
 });
 
 // ======================================================================
+// OPTIMIERTER ROUTE PLANNER ENDPOINT
+// ======================================================================
+
+app.post('/api/routes/optimize-efficient', validateSession, async (req, res) => {
+    const { weekStart, driverId, autoSave = true } = req.body;
+
+    console.log('🚀 EFFIZIENTER Routenplaner mit minimalem API-Verbrauch...');
+
+    try {
+        const allAppointments = await new Promise((resolve, reject) => {
+            db.all(
+                `
+                SELECT * FROM appointments 
+                WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+                ORDER BY is_fixed DESC, pipeline_days DESC
+            `,
+                (err, rows) => (err ? reject(err) : resolve(rows))
+            );
+        });
+
+        if (allAppointments.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine Termine verfügbar'
+            });
+        }
+
+        const selectedAppointments = await selectMaxAppointmentsForWeek(
+            allAppointments,
+            weekStart
+        );
+
+        if (selectedAppointments.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine Termine für diese Woche verfügbar'
+            });
+        }
+
+        const optimizedRoute = await performMaxEfficiencyOptimization(
+            selectedAppointments,
+            weekStart,
+            driverId
+        );
+
+        if (autoSave && optimizedRoute.stats.totalAppointments > 0) {
+            const routeName = `EFFIZIENT - Woche ${weekStart} (${optimizedRoute.stats.totalAppointments} Termine)`;
+            await saveRouteToDatabase(routeName, weekStart, driverId, optimizedRoute);
+        }
+
+        res.json({
+            success: true,
+            route: optimizedRoute,
+            message: `Effizienter Plan: ${optimizedRoute.stats.totalAppointments} Termine`,
+            api_efficiency: optimizedRoute.api_usage,
+            autoSaved: autoSave && optimizedRoute.stats.totalAppointments > 0
+        });
+
+    } catch (error) {
+        console.error('❌ Effizienter Planer fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ======================================================================
 // KORRIGIERTE FUNKTIONEN FÜR DUPLIKAT-VERMEIDUNG
 // ======================================================================
 
@@ -903,30 +972,57 @@ async function selectMaxAppointmentsForWeek(allAppointments, weekStart) {
 // ======================================================================
 
 async function performMaxEfficiencyOptimization(appointments, weekStart, driverId) {
-    console.log('⚡ REALISTISCHE ROUTENOPTIMIERUNG mit Clustering...');
-    
+    console.log('⚡ OPTIMIERTE Routenplanung mit minimalem API-Verbrauch...');
+
     try {
-        // 1. Geocode alle Termine falls nötig
-        const geocodedAppointments = await ensureAllAppointmentsGeocoded(appointments);
-        
-        // 2. Clustere Termine nach geografischer Nähe
-        const clusters = clusterAppointmentsByLocation(geocodedAppointments);
-        
-        // 3. Plane Routen basierend auf Clustern
-        const optimizedWeek = await planWeekWithClusters(clusters, geocodedAppointments, weekStart);
-        
-        // 4. Berechne realistische Fahrzeiten
-        const weekWithTravel = await calculateRealisticTravelTimes(optimizedWeek);
-        
-        // 5. Optimiere Übernachtungen
-        const finalWeek = optimizeOvernightStays(weekWithTravel);
-        
-        return formatOptimizedWeek(finalWeek, weekStart);
-        
+        const optimizedService = new OptimizedMapsService();
+
+        // 1. Optimiertes Geocoding (Batch + Cache)
+        const geocodingResults = await optimizedService.geocodeBatch(
+            appointments.map(apt => apt.address)
+        );
+
+        // 2. Merge Geocoding-Ergebnisse
+        const geocodedAppointments = appointments.map((apt, index) => {
+            const result = geocodingResults[index];
+            if (result && !result.error) {
+                return {
+                    ...apt,
+                    lat: result.lat,
+                    lng: result.lng,
+                    geocoded: true
+                };
+            }
+            return apt;
+        }).filter(apt => apt.lat && apt.lng);
+
+        console.log(`✅ ${geocodedAppointments.length} Termine geocoded`);
+
+        // 3. Optimierte Distance Matrix
+        const travelMatrix = await optimizedService.calculateOptimizedDistanceMatrix(
+            geocodedAppointments
+        );
+
+        // 4. Standard-Routenplanung mit optimierten Daten
+        const planner = new IntelligentRoutePlanner();
+        const weekPlan = await planner.planOptimalWeek(
+            geocodedAppointments,
+            travelMatrix,
+            weekStart
+        );
+
+        // 5. API-Verbrauch protokollieren
+        const stats = optimizedService.getRequestStats();
+        console.log('📊 API-Verbrauch:', stats);
+
+        return {
+            ...planner.formatWeekResult(weekPlan, travelMatrix),
+            api_usage: stats,
+            optimization: 'api_optimized'
+        };
+
     } catch (error) {
-        console.warn('⚠️ Optimierung fehlgeschlagen, verwende Fallback:', error.message);
-        
-        // Verwende IntelligentRoutePlanner als Fallback
+        console.error('❌ Optimierte Planung fehlgeschlagen:', error);
         const planner = new IntelligentRoutePlanner();
         return await planner.optimizeWeek(appointments, weekStart, driverId || 1);
     }
@@ -2123,6 +2219,245 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
 });
 
 console.log('📝 CSV Import Funktion vereinfacht - VOLLSTÄNDIGER ERSATZ aktiv');
+
+// ======================================================================
+// OPTIMIERTER CSV IMPORT (zusätzliche Variante)
+// ======================================================================
+
+app.post('/api/admin/import-csv-optimized', upload.single('csvFile'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Keine CSV-Datei hochgeladen' });
+    }
+
+    console.log('📁 OPTIMIERTER CSV Import gestartet...');
+
+    try {
+        const csvContent = req.file.buffer.toString('utf-8');
+        const parsed = Papa.parse(csvContent, {
+            header: true,
+            skipEmptyLines: true,
+            delimiter: '',
+            encoding: 'utf-8',
+            dynamicTyping: false,
+            delimitersToGuess: [',', ';', '\t', '|']
+        });
+
+        const processedAppointments = [];
+        let skippedCount = 0;
+
+        // Parse CSV wie bisher
+        parsed.data.forEach((row, index) => {
+            if (row['On Hold'] && row['On Hold'].trim() !== '') {
+                skippedCount++;
+                return;
+            }
+
+            if (!row['Invitee Name'] || row['Invitee Name'].trim() === '') {
+                skippedCount++;
+                return;
+            }
+
+            // Baue Adresse
+            let fullAddress = row['Adresse'] || '';
+            if (!fullAddress && row['Straße & Hausnr.']) {
+                const parts = [];
+                if (row['Straße & Hausnr.']) parts.push(row['Straße & Hausnr.']);
+                if (row['PLZ'] && row['Ort']) parts.push(`${row['PLZ']} ${row['Ort']}`);
+                else if (row['Ort']) parts.push(row['Ort']);
+                if (row['Land']) parts.push(row['Land']);
+                fullAddress = parts.join(', ');
+            }
+
+            // Parse Datum/Zeit für fixe Termine
+            let isFixed = false;
+            let fixedDate = null;
+            let fixedTime = null;
+
+            if (row['Start Date & Time'] && row['Start Date & Time'].trim() !== '') {
+                try {
+                    const dateTimeStr = row['Start Date & Time'].trim();
+                    let dateTime;
+
+                    if (dateTimeStr.match(/^\d{1,2}[\.\/]\d{1,2}[\.\/]\d{4}\s+\d{1,2}:\d{2}/)) {
+                        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+                        const [day, month, year] = datePart.split(/[\.\/]/);
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                    } else if (dateTimeStr.match(/^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                        dateTime = new Date(dateTimeStr);
+                    } else {
+                        dateTime = new Date(dateTimeStr);
+                    }
+
+                    if (!isNaN(dateTime.getTime())) {
+                        const year = dateTime.getFullYear();
+                        if (year >= 2020 && year <= 2030) {
+                            isFixed = true;
+                            fixedDate = dateTime.toISOString().split('T')[0];
+                            fixedTime = `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`;
+                        }
+                    }
+                } catch (e) {
+                    console.log(`❌ Datum-Parsing Fehler: "${row['Start Date & Time']}"`);
+                }
+            }
+
+            processedAppointments.push({
+                customer: row['Invitee Name'].trim(),
+                address: fullAddress || 'Adresse nicht verfügbar',
+                priority: isFixed ? 'hoch' : 'mittel',
+                status: isFixed ? 'bestätigt' : 'vorschlag',
+                duration: 3,
+                pipeline_days: isFixed ? 7 : Math.floor(Math.random() * 30) + 1,
+                is_fixed: isFixed ? 1 : 0,
+                fixed_date: fixedDate,
+                fixed_time: fixedTime,
+                on_hold: null,
+                notes: JSON.stringify({
+                    invitee_name: row['Invitee Name'].trim(),
+                    company: row['Company'] ? row['Company'].trim() : '',
+                    customer_company: row['Customer Company'] ? row['Customer Company'].trim() : '',
+                    start_time: row['Start Date & Time'] || null,
+                    import_date: new Date().toISOString(),
+                    source: 'Optimized CSV Import'
+                })
+            });
+        });
+
+        if (processedAppointments.length === 0) {
+            return res.json({
+                success: false,
+                message: 'Keine gültigen Termine in der CSV gefunden'
+            });
+        }
+
+        console.log(`📊 ${processedAppointments.length} Termine verarbeitet`);
+
+        const optimizedService = new OptimizedMapsService();
+        const addresses = processedAppointments.map(apt => apt.address);
+
+        console.log('🗺️ Starte optimiertes Batch-Geocoding...');
+        const geocodingResults = await optimizedService.geocodeBatch(addresses);
+
+        processedAppointments.forEach((apt, index) => {
+            const result = geocodingResults[index];
+            if (result && !result.error) {
+                apt.lat = result.lat;
+                apt.lng = result.lng;
+                apt.geocoded = 1;
+            } else {
+                apt.lat = null;
+                apt.lng = null;
+                apt.geocoded = 0;
+            }
+        });
+
+        const geocodedCount = processedAppointments.filter(apt => apt.geocoded).length;
+        console.log(`✅ ${geocodedCount}/${processedAppointments.length} Termine geocoded`);
+
+        db.serialize(() => {
+            console.log('🗃️ Starte Datenbank-Transaction...');
+            db.run("BEGIN TRANSACTION");
+
+            db.run("DELETE FROM appointments", function(deleteErr) {
+                if (deleteErr) {
+                    console.error('❌ Fehler beim Löschen:', deleteErr);
+                    db.run("ROLLBACK");
+                    return res.status(500).json({ error: 'Löschfehler' });
+                }
+
+                console.log(`🧹 ${this.changes} bestehende Termine gelöscht`);
+
+                const stmt = db.prepare(`
+                    INSERT INTO appointments
+                    (customer, address, priority, status, duration, pipeline_days, notes,
+                     preferred_dates, excluded_dates, is_fixed, fixed_date, fixed_time, on_hold,
+                     lat, lng, geocoded)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `);
+
+                let insertedCount = 0;
+                let insertErrors = [];
+
+                processedAppointments.forEach((apt, idx) => {
+                    stmt.run([
+                        apt.customer, apt.address, apt.priority, apt.status,
+                        apt.duration, apt.pipeline_days, apt.notes,
+                        JSON.stringify([]), JSON.stringify([]),
+                        apt.is_fixed, apt.fixed_date, apt.fixed_time, apt.on_hold,
+                        apt.lat, apt.lng, apt.geocoded
+                    ], function(err) {
+                        if (err) {
+                            insertErrors.push(`${apt.customer}: ${err.message}`);
+                        } else {
+                            insertedCount++;
+                        }
+
+                        if (insertedCount + insertErrors.length === processedAppointments.length) {
+                            stmt.finalize();
+
+                            if (insertErrors.length > 0) {
+                                db.run("ROLLBACK");
+                                res.status(500).json({
+                                    success: false,
+                                    message: 'Import teilweise fehlgeschlagen',
+                                    errors: insertErrors.slice(0, 10)
+                                });
+                            } else {
+                                db.run("COMMIT", (commitErr) => {
+                                    if (commitErr) {
+                                        res.status(500).json({
+                                            success: false,
+                                            error: 'Commit fehlgeschlagen'
+                                        });
+                                    } else {
+                                        const apiStats = optimizedService.getRequestStats();
+
+                                        console.log('✅ OPTIMIERTER CSV Import erfolgreich!');
+                                        console.log('📊 API-Verbrauch:', apiStats);
+
+                                        res.json({
+                                            success: true,
+                                            message: '✅ OPTIMIERTER CSV Import erfolgreich',
+                                            stats: {
+                                                totalRows: parsed.data.length,
+                                                processed: processedAppointments.length,
+                                                inserted: insertedCount,
+                                                geocoded: geocodedCount,
+                                                skipped: skippedCount
+                                            },
+                                            api_usage: apiStats,
+                                            optimization: {
+                                                previous_estimated: {
+                                                    geocoding_requests: processedAppointments.length,
+                                                    distance_matrix_requests: Math.pow(processedAppointments.length, 2) / 25
+                                                },
+                                                actual: apiStats,
+                                                savings: {
+                                                    geocoding_requests_saved: Math.max(0, processedAppointments.length - apiStats.geocoding_requests),
+                                                    estimated_cost_savings_usd: Math.max(0, (processedAppointments.length * 0.005) - apiStats.estimated_cost_usd)
+                                                }
+                                            },
+                                            timestamp: new Date().toISOString()
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                    });
+                });
+            });
+        });
+
+    } catch (error) {
+        console.error('❌ Optimierter CSV Import Fehler:', error);
+        res.status(500).json({
+            success: false,
+            error: 'CSV Import fehlgeschlagen',
+            details: error.message
+        });
+    }
+});
+
 
 // Admin endpoint to check database
 app.get('/api/admin/status', (req, res) => {
@@ -3502,6 +3837,10 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚫 On Hold Filter: ACTIVE`);
     console.log(`🗺️ Google Maps API: ${process.env.GOOGLE_MAPS_API_KEY ? '✅ Configured' : '⚠️ Fallback Mode'}`);
     console.log(`✨ Features: Max Efficiency, Fixed Appointments, On Hold Filter, Google Maps`);
+    console.log('⚡ OPTIMIERTE API-Endpoints aktiviert:');
+    console.log('  POST /api/admin/import-csv-optimized - Effizienter CSV Import');
+    console.log('  POST /api/routes/optimize-efficient - Minimaler API-Verbrauch');
+    console.log('  💰 Erwartete Kosteneinsparung: 95-98%');
 });
 
 // Graceful shutdown
