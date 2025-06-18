@@ -413,7 +413,7 @@ class IntelligentRoutePlanner {
             for (let dayIndex = 0; dayIndex < week.length; dayIndex++) {
                 const day = week[dayIndex];
 
-                if (day.workTime + 3 > this.constraints.maxWorkHoursPerDay) {
+                if (day.workTime + day.travelTime + 3 > this.constraints.maxWorkHoursPerDay) {
                     continue;
                 }
 
@@ -437,42 +437,55 @@ class IntelligentRoutePlanner {
     // OPTIMALEN ZEITSLOT FINDEN (MIT ECHTEN FAHRZEITEN!)
     // ======================================================================
     findOptimalTimeSlot(day, appointment, travelMatrix) {
-        const currentLocationId = day.currentLocation || 'home';
-        const travelToAppointment = travelMatrix[currentLocationId]?.[appointment.id];
-        
-        if (!travelToAppointment) {
-            console.warn(`❌ Keine Routendaten von ${currentLocationId} zu ${appointment.id}`);
-            return null;
-        }
+        const slots = this.findAvailableSlots(day);
 
-        // Verwende ECHTE Fahrzeit von Google Maps!
-        const travelTime = travelToAppointment.duration_in_traffic || travelToAppointment.duration;
-        
-        let startTime = day.lastAppointmentEnd + travelTime;
-        startTime = Math.max(startTime, this.constraints.workStartTime);
-        startTime = Math.round(startTime * 2) / 2; // 30-Minuten-Schritte
-        
-        const appointmentEnd = startTime + this.constraints.appointmentDuration;
-        
-        if (appointmentEnd > this.constraints.workEndTime) {
-            return null;
-        }
+        for (const s of slots) {
+            const currentLocationId = day.currentLocation || 'home';
+            const travelToAppointment = travelMatrix[currentLocationId]?.[appointment.id];
 
-        // Prüfe Rückfahrt
-        const travelHome = travelMatrix[appointment.id]?.['home'];
-        if (travelHome) {
-            const returnTime = appointmentEnd + travelHome.duration;
-            if (returnTime > this.constraints.workEndTime && travelHome.distance < this.constraints.minOvernightDistance) {
+            if (!travelToAppointment) {
+                console.warn(`❌ Keine Routendaten von ${currentLocationId} zu ${appointment.id}`);
                 return null;
             }
+
+            const travelTime = travelToAppointment.duration_in_traffic || travelToAppointment.duration;
+
+            let startTime = Math.max(this.timeToHours(s.startTime), day.lastAppointmentEnd + travelTime);
+            startTime = Math.round(startTime * 2) / 2;
+
+            const appointmentEnd = startTime + this.constraints.appointmentDuration;
+
+            if (appointmentEnd > this.timeToHours(s.endTime)) {
+                continue;
+            }
+
+            if (appointmentEnd > this.constraints.workEndTime) {
+                continue;
+            }
+
+            const travelHome = travelMatrix[appointment.id]?.['home'];
+            if (travelHome) {
+                const returnTime = appointmentEnd + travelHome.duration;
+                if (returnTime > this.constraints.workEndTime) {
+                    if (travelHome.distance < this.constraints.overnightThreshold) {
+                        continue;
+                    }
+                    day.overnight = {
+                        city: this.extractCityFromAddress(appointment.address),
+                        distance: travelHome.distance
+                    };
+                }
+            }
+
+            return {
+                time: this.formatTime(startTime),
+                startTime: startTime,
+                travelTime: travelTime,
+                travelDistance: travelToAppointment.distance
+            };
         }
 
-        return {
-            time: this.formatTime(startTime),
-            startTime: startTime,
-            travelTime: travelTime,
-            travelDistance: travelToAppointment.distance
-        };
+        return null;
     }
 
     // ======================================================================
@@ -762,6 +775,57 @@ class IntelligentRoutePlanner {
         return h + (m || 0) / 60;
     }
 
+    findAvailableSlots(day) {
+        const slots = [];
+        const dayStart = day.earliestStart || 6;
+        const dayEnd = day.latestEnd || 20;
+
+        if (day.appointments.length === 0) {
+            slots.push({
+                startTime: this.formatTime(dayStart),
+                endTime: this.formatTime(dayEnd),
+                duration: dayEnd - dayStart
+            });
+            return slots;
+        }
+
+        const sorted = [...day.appointments].sort((a, b) =>
+            this.timeToHours(a.startTime) - this.timeToHours(b.startTime)
+        );
+
+        const firstStart = this.timeToHours(sorted[0].startTime);
+        if (firstStart > dayStart + 1) {
+            slots.push({
+                startTime: this.formatTime(dayStart),
+                endTime: this.formatTime(firstStart - 1),
+                duration: firstStart - 1 - dayStart
+            });
+        }
+
+        for (let i = 0; i < sorted.length - 1; i++) {
+            const currentEnd = this.timeToHours(sorted[i].endTime);
+            const nextStart = this.timeToHours(sorted[i + 1].startTime);
+            if (nextStart - currentEnd > 1) {
+                slots.push({
+                    startTime: this.formatTime(currentEnd + 0.5),
+                    endTime: this.formatTime(nextStart - 0.5),
+                    duration: nextStart - currentEnd - 1
+                });
+            }
+        }
+
+        const lastEnd = this.timeToHours(sorted[sorted.length - 1].endTime);
+        if (dayEnd - lastEnd > 1) {
+            slots.push({
+                startTime: this.formatTime(lastEnd + 0.5),
+                endTime: this.formatTime(dayEnd),
+                duration: dayEnd - lastEnd - 0.5
+            });
+        }
+
+        return slots;
+    }
+
     // NUR FÜR REGIONSZUORDNUNG - NICHT FÜR FAHRZEITEN!
     calculateHaversineDistance(from, to) {
         const R = 6371;
@@ -777,8 +841,9 @@ class IntelligentRoutePlanner {
     // ======================================================================
     // TERMIN KANN EINGEPLANT WERDEN PRÜFEN
     // ======================================================================
-    canFitAppointment(weekPlan, appointment) {
-        const totalScheduled = weekPlan.stats.totalAppointments;
+    canFitAppointment(weekPlan, appointment, scheduledCount = null) {
+        const totalScheduled =
+            scheduledCount !== null ? scheduledCount : (weekPlan.stats ? weekPlan.stats.totalAppointments : 0);
         const maxPossible = Math.floor(this.constraints.maxWorkHoursPerWeek / this.constraints.appointmentDuration);
 
         return {
