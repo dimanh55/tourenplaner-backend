@@ -11,10 +11,9 @@ require('dotenv').config();
 // INTELLIGENTE ROUTENPLANUNG KLASSE (Aus separater Datei importiert)
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
-// Optimierte Google Maps Helper
-const { OptimizedMapsService } = require('./optimized-maps-service.js');
+
+// FIX: Nur EINEN Import für OptimizedMapsService
 const { OptimizedMapsService } = require('./optimized-maps-service');
-const OptimizedMapsService = require('./optimized-maps-service');
 
 // Debug: Umgebungsvariablen prüfen
 console.log('🔍 Environment Variables Debug:');
