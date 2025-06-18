@@ -15,6 +15,10 @@ class OptimizedMapsService {
                 ? '/app/data/expertise_tours.db'
                 : './expertise_tours.db'
         );
+
+class OptimizedMapsService {
+    constructor() {
+        this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
         this.geocodingCache = new Map();
         this.distanceCache = new Map();
         this.requestCounts = {
@@ -36,6 +40,9 @@ class OptimizedMapsService {
         this.db.all(`
             SELECT address, lat, lng
             FROM appointments
+        db.all(`
+            SELECT address, lat, lng 
+            FROM appointments 
             WHERE lat IS NOT NULL AND lng IS NOT NULL
         `, (err, rows) => {
             if (!err && rows) {
@@ -440,6 +447,10 @@ class OptimizedMapsService {
             VALUES (?, ?, ?, datetime('now'))`,
             [address, coords.lat, coords.lng]
         );
+        db.run(`
+            INSERT OR REPLACE INTO geocoding_cache (address, lat, lng, created_at)
+            VALUES (?, ?, ?, datetime('now'))
+        `, [address, coords.lat, coords.lng]);
     }
     
     getRequestStats() {
@@ -514,6 +525,8 @@ class OptimizedIntelligentRoutePlanner extends IntelligentRoutePlanner {
 // ======================================================================
 
 function initializeGeocodingCache(db) {
+function initializeGeocodingCache(db) {
+function initializeGeocodingCache() {
     db.run(`CREATE TABLE IF NOT EXISTS geocoding_cache (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         address TEXT UNIQUE NOT NULL,
@@ -521,7 +534,6 @@ function initializeGeocodingCache(db) {
         lng REAL NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
-
     db.run(`CREATE INDEX IF NOT EXISTS idx_geocoding_address ON geocoding_cache(address)`);
 }
 
