@@ -3,6 +3,19 @@
 // Ersetzt die bisherige ineffiziente Nutzung
 // ======================================================================
 
+
+const axios = require('axios');
+const sqlite3 = require('sqlite3').verbose();
+const IntelligentRoutePlanner = require('./intelligent-route-planner');
+
+class OptimizedMapsService {
+    constructor(dbInstance) {
+        this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        this.db = dbInstance || new sqlite3.Database(
+            process.env.NODE_ENV === 'production'
+                ? '/app/data/expertise_tours.db'
+                : './expertise_tours.db'
+        );
 class OptimizedMapsService {
     constructor() {
         this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -24,6 +37,9 @@ class OptimizedMapsService {
     
     async initializeCache() {
         // Lade bestehende Geocoding-Daten aus der Datenbank
+        this.db.all(`
+            SELECT address, lat, lng
+            FROM appointments
         db.all(`
             SELECT address, lat, lng 
             FROM appointments 
@@ -426,6 +442,11 @@ class OptimizedMapsService {
     
     async saveGeocodingToDB(address, coords) {
         // Optional: Speichere Geocoding-Ergebnisse in separater Tabelle für Cache
+        this.db.run(
+            `INSERT OR REPLACE INTO geocoding_cache (address, lat, lng, created_at)
+            VALUES (?, ?, ?, datetime('now'))`,
+            [address, coords.lat, coords.lng]
+        );
         db.run(`
             INSERT OR REPLACE INTO geocoding_cache (address, lat, lng, created_at)
             VALUES (?, ?, ?, datetime('now'))
@@ -502,7 +523,7 @@ class OptimizedIntelligentRoutePlanner extends IntelligentRoutePlanner {
 // ======================================================================
 // DATABASE SCHEMA ERWEITERUNG
 // ======================================================================
-
+function initializeGeocodingCache(db) {
 function initializeGeocodingCache() {
     db.run(`CREATE TABLE IF NOT EXISTS geocoding_cache (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -511,7 +532,6 @@ function initializeGeocodingCache() {
         lng REAL NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
-    
     db.run(`CREATE INDEX IF NOT EXISTS idx_geocoding_address ON geocoding_cache(address)`);
 }
 

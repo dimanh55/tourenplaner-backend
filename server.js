@@ -11,6 +11,7 @@ require('dotenv').config();
 // INTELLIGENTE ROUTENPLANUNG KLASSE (Aus separater Datei importiert)
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
+const { OptimizedMapsService } = require('./optimized-maps-service');
 const OptimizedMapsService = require('./optimized-maps-service');
 
 // Debug: Umgebungsvariablen prüfen
@@ -975,6 +976,7 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
     console.log('⚡ OPTIMIERTE Routenplanung mit minimalem API-Verbrauch...');
 
     try {
+        const optimizedService = new OptimizedMapsService(db);
         const optimizedService = new OptimizedMapsService();
 
         // 1. Optimiertes Geocoding (Batch + Cache)
@@ -2332,6 +2334,7 @@ app.post('/api/admin/import-csv-optimized', upload.single('csvFile'), async (req
 
         console.log(`📊 ${processedAppointments.length} Termine verarbeitet`);
 
+        const optimizedService = new OptimizedMapsService(db);
         const optimizedService = new OptimizedMapsService();
         const addresses = processedAppointments.map(apt => apt.address);
 
