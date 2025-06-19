@@ -499,7 +499,7 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
         // 4. Führe echte intelligente Routenoptimierung durch
         let optimizedRoute;
         try {
-            const planner = new IntelligentRoutePlanner(db, USE_OPTIMIZED_SERVICE);
+            const planner = new IntelligentRoutePlanner(db);
             optimizedRoute = await planner.optimizeWeek(selectedAppointments, weekStart, driverId);
         } catch (plannerError) {
             console.error('❌ Intelligente Planung fehlgeschlagen:', plannerError.message);
@@ -612,7 +612,7 @@ app.post('/api/routes/optimize-all', validateSession, async (req, res) => {
             }
 
             try {
-                const planner = new IntelligentRoutePlanner(db, USE_OPTIMIZED_SERVICE);
+                const planner = new IntelligentRoutePlanner(db);
                 const weekRoute = await planner.optimizeWeek(appointmentsForWeek, currentWeek, driverId || 1);
 
                 const plannedCount = weekRoute.stats.totalAppointments;
@@ -767,7 +767,7 @@ app.post('/api/routes/recalculate', validateSession, async (req, res) => {
             });
         }
 
-        const planner = new IntelligentRoutePlanner(db, USE_OPTIMIZED_SERVICE);
+        const planner = new IntelligentRoutePlanner(db);
         const optimizedRoute = await planner.optimizeWeek(allAppointmentsForWeek, weekStart, driverId || 1);
 
         const routeName = `Woche ${weekStart}: KW ${getWeekNumber(weekStart)} (${optimizedRoute.stats.totalAppointments} Termine) - Neuberechnet`;
@@ -1002,7 +1002,7 @@ async function performMaxEfficiencyOptimization(appointments, weekStart, driverI
     console.log('⚡ Standard Routenplanung (ohne Optimized Service)...');
 
     try {
-        const planner = new IntelligentRoutePlanner(db, USE_OPTIMIZED_SERVICE);
+        const planner = new IntelligentRoutePlanner(db);
         const optimizedRoute = await planner.optimizeWeek(appointments, weekStart, driverId || 1);
 
         return {
@@ -3541,7 +3541,7 @@ app.post('/api/appointments/suggest-alternatives', validateSession, async (req, 
         }
 
         // Nutze die neue intelligente Funktion
-        const planner = new IntelligentRoutePlanner(db, USE_OPTIMIZED_SERVICE);
+        const planner = new IntelligentRoutePlanner(db);
         const alternatives = await planner.suggestAlternativeSlots(appointment, weekPlan);
 
         // Optional: Markiere den Termin als "verschoben" oder "pending"

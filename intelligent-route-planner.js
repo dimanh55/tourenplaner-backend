@@ -1,7 +1,8 @@
 const axios = require('axios');
 
 class IntelligentRoutePlanner {
-    constructor() {
+    constructor(db) {
+        this.db = db;
         this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
         this.distanceCache = new Map();
         this.apiCallsCount = 0;
