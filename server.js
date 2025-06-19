@@ -2442,7 +2442,7 @@ app.get('/api/admin/status', (req, res) => {
 
 // Admin endpoint to ensure driver exists
 app.post('/api/admin/ensure-driver', (req, res) => {
-    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
+    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base)
             VALUES (1, 'Testimonial-Fahrer', 'Kurt-Schumacher-Straße 34, 30159 Hannover')`, function(err) {
         if (err) {
             res.status(500).json({ error: err.message });
@@ -2464,6 +2464,11 @@ app.post('/api/admin/ensure-driver', (req, res) => {
             });
         });
     });
+});
+
+// Admin endpoint to show API usage statistics
+app.get('/api/admin/api-usage', validateSession, (req, res) => {
+    // Zeigt API-Nutzungsstatistiken
 });
 // ======================================================================
 // DEBUG ENDPOINTS FÜR GOOGLE MAPS API TESTS
