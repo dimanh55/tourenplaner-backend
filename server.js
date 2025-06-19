@@ -18,12 +18,6 @@ console.log('🔍 Environment Variables Debug:');
 console.log('NODE_ENV:', process.env.NODE_ENV);
 console.log('GOOGLE_MAPS_API_KEY exists:', !!process.env.GOOGLE_MAPS_API_KEY);
 
-// Fallback API Key
-if (!process.env.GOOGLE_MAPS_API_KEY) {
-    console.log('⚠️ Setting fallback API key');
-    process.env.GOOGLE_MAPS_API_KEY = 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
-}
-
 // ======================================================================
 // EXPRESS APP SETUP
 // ======================================================================
@@ -171,6 +165,18 @@ function initializeDatabase() {
         user_data TEXT,
         expires_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // Distance Matrix Cache
+    db.run(`CREATE TABLE IF NOT EXISTS distance_cache (
+        origin_lat REAL,
+        origin_lng REAL,
+        dest_lat REAL,
+        dest_lng REAL,
+        distance REAL,
+        duration REAL,
+        cached_at DATETIME,
+        PRIMARY KEY (origin_lat, origin_lng, dest_lat, dest_lng)
     )`);
 
     // Stelle sicher, dass IMMER ein Fahrer existiert

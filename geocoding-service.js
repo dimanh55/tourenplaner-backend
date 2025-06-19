@@ -7,7 +7,10 @@ const axios = require('axios');
 
 class EnhancedGeocodingService {
     constructor() {
-        this.apiKey = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4';
+        this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        if (!this.apiKey) {
+            throw new Error('Google Maps API Key nicht konfiguriert');
+        }
         this.requestCount = 0;
         this.cache = new Map(); // Simple in-memory cache
         this.googleApiDisabled = false;
