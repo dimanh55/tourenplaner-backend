@@ -170,7 +170,7 @@ function initializeDatabase() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Distance Matrix Cache
+    // Distance Matrix Cache - WICHTIG FÜR KOSTENERSPARNIS!
     db.run(`CREATE TABLE IF NOT EXISTS distance_cache (
         origin_lat REAL,
         origin_lng REAL,
@@ -178,9 +178,27 @@ function initializeDatabase() {
         dest_lng REAL,
         distance REAL,
         duration REAL,
-        cached_at DATETIME,
+        cached_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (origin_lat, origin_lng, dest_lat, dest_lng)
-    )`);
+    )`, (err) => {
+        if (err) {
+            console.error('❌ Distance Cache Tabelle konnte nicht erstellt werden:', err);
+        } else {
+            console.log('✅ Distance Cache Tabelle erstellt/verifiziert');
+        }
+    });
+
+    // Optional: Index für schnellere Suche
+    db.run(`CREATE INDEX IF NOT EXISTS idx_distance_cache_coords 
+            ON distance_cache(origin_lat, origin_lng, dest_lat, dest_lng)`);
+
+    // Cache-Bereinigung für alte Einträge (älter als 30 Tage)
+    db.run(`DELETE FROM distance_cache 
+            WHERE cached_at < datetime('now', '-30 days')`, (err, result) => {
+        if (!err) {
+            console.log('🧹 Alte Distance Cache Einträge bereinigt');
+        }
+    });
 
     // Stelle sicher, dass IMMER ein Fahrer existiert
     db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
