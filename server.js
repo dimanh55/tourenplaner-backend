@@ -3449,6 +3449,110 @@ app.delete('/api/appointments/fixed/:id', validateSession, async (req, res) => {
     }
 });
 
+// Alternative Terminvorschläge für abgelehnte Termine
+app.post('/api/appointments/suggest-alternatives', validateSession, async (req, res) => {
+    const { appointmentId, reason = 'customer_rejected' } = req.body;
+
+    if (!appointmentId) {
+        return res.status(400).json({ error: 'appointmentId is required' });
+    }
+
+    try {
+        // Lade den abgelehnten Termin
+        const appointment = await new Promise((resolve, reject) => {
+            db.get(
+                "SELECT * FROM appointments WHERE id = ?",
+                [appointmentId],
+                (err, row) => (err ? reject(err) : resolve(row))
+            );
+        });
+
+        if (!appointment) {
+            return res.status(404).json({ error: 'Termin nicht gefunden' });
+        }
+
+        // Lade aktuelle Wochenplanung für diese Woche
+        const currentWeek = new Date();
+        const monday = new Date(currentWeek);
+        monday.setDate(monday.getDate() - monday.getDay() + 1);
+        const weekStart = monday.toISOString().split('T')[0];
+
+        // Lade gespeicherte Route für diese Woche
+        const savedRoute = await new Promise((resolve, reject) => {
+            db.get(
+                "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
+                [weekStart],
+                (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                }
+            );
+        });
+
+        let weekPlan;
+        if (savedRoute) {
+            weekPlan = JSON.parse(savedRoute.route_data);
+        } else {
+            // Keine Route für diese Woche - erstelle leere Struktur
+            weekPlan = {
+                weekStart: weekStart,
+                days: ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'].map((day, index) => {
+                    const date = new Date(monday);
+                    date.setDate(monday.getDate() + index);
+                    return {
+                        day: day,
+                        date: date.toISOString().split('T')[0],
+                        appointments: [],
+                        travelSegments: []
+                    };
+                })
+            };
+        }
+
+        // Nutze die neue intelligente Funktion
+        const planner = new IntelligentRoutePlanner();
+        const alternatives = await planner.suggestAlternativeSlots(appointment, weekPlan);
+
+        // Optional: Markiere den Termin als "verschoben" oder "pending"
+        if (reason === 'customer_rejected') {
+            await new Promise((resolve, reject) => {
+                db.run(
+                    `UPDATE appointments 
+                     SET status = 'verschoben', 
+                         notes = json_set(COALESCE(notes, '{}'), '$.rejection_reason', ?)
+                     WHERE id = ?`,
+                    [reason, appointmentId],
+                    (err) => (err ? reject(err) : resolve())
+                );
+            });
+        }
+
+        res.json({
+            success: true,
+            appointment: {
+                id: appointment.id,
+                customer: appointment.customer,
+                address: appointment.address,
+                originalStatus: appointment.status
+            },
+            alternatives: alternatives,
+            message: 'Alternative Terminvorschläge generiert',
+            nextSteps: [
+                'Wählen Sie eine Alternative aus',
+                'Informieren Sie den Kunden',
+                'Bestätigen Sie den neuen Termin'
+            ]
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler bei Alternativvorschlägen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 console.log('📌 Erweiterte Termine-Endpoints hinzugefügt:');
 console.log('  GET  /api/appointments/all - ALLE Termine (inkl. fixe)');
 console.log('  GET  /api/appointments - Nur flexible Termine');
@@ -3456,6 +3560,7 @@ console.log('  GET  /api/admin/analyze-appointments - Termin-Analyse');
 console.log('  POST /api/appointments/fixed - Fixen Termin erstellen');
 console.log('  PUT  /api/appointments/fixed/:id - Fixen Termin bearbeiten');
 console.log('  DELETE /api/appointments/fixed/:id - Fixen Termin löschen');
+console.log('  POST /api/appointments/suggest-alternatives - Alternative Terminvorschläge');
 
 // ======================================================================
 // SERVER INTEGRATION FÜR ENHANCED GEOCODING SERVICE
