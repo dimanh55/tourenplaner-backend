@@ -1,9 +1,18 @@
 const axios = require('axios');
 const EnhancedGeocodingService = require('./geocoding-service');
+const UltraOptimizedMapsService = require('./optimized-maps-service');
 
 class IntelligentRoutePlanner {
-    constructor() {
+    constructor(db = null, useOptimized = false) {
         this.geocodingService = new EnhancedGeocodingService();
+        this.db = db;
+        if (useOptimized) {
+            try {
+                this.optimizedService = new UltraOptimizedMapsService(db);
+            } catch (err) {
+                console.warn('⚠️ Optimized Maps Service konnte nicht initialisiert werden:', err.message);
+            }
+        }
         this.constraints = {
             maxWorkHoursPerWeek: 42.5,      // Max 40h Arbeit + 2.5h Pausen
             maxWorkHoursPerDay: 9,         // Arbeit + Fahrtzeit (Ende 18:00)
@@ -119,6 +128,12 @@ class IntelligentRoutePlanner {
     async geocodeAppointments(appointments) {
         console.log('🗺️ Geocoding von Adressen...');
 
+        if (this.optimizedService) {
+            // Verwende den optimierten Service für Batch-Geocoding
+            const results = await this.optimizedService.smartGeocodeBatch(appointments);
+            return results;
+        }
+
         const geocoded = [];
         for (const apt of appointments) {
             if (apt.lat && apt.lng) {
@@ -152,8 +167,15 @@ class IntelligentRoutePlanner {
     // REISEMATRIX MIT GOOGLE DISTANCE MATRIX API
     // ======================================================================
     async calculateTravelMatrix(appointments) {
-        console.log('🚗 Berechne OPTIMIERTE Reisematrix...');
-        console.log('💰 KOSTEN-SPAR-MODUS AKTIV');
+        console.log('🚗 Berechne Reisematrix...');
+
+        // Wenn verfügbar, nutze den UltraOptimizedMapsService
+        if (this.optimizedService) {
+            return await this.optimizedService.calculateSmartDistanceMatrix(appointments);
+        }
+
+        // Fallback auf bisherige Implementierung
+        console.log('⚠️ Nutze Fallback-Algorithmus ohne Optimized Service');
 
         const matrix = {};
         const apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -162,118 +184,48 @@ class IntelligentRoutePlanner {
             throw new Error('Google Maps API Key nicht konfiguriert!');
         }
 
-        // KRITISCH: Cluster-basierte Berechnung statt vollständiger Matrix!
-        const clusters = this.clusterAppointmentsByProximity(appointments);
-        console.log(`📊 ${appointments.length} Termine in ${clusters.length} Cluster gruppiert`);
-
-        // Home-Base
         const homePoint = { id: 'home', ...this.constraints.homeBase };
         const allPoints = [homePoint, ...appointments];
 
-        let apiCalls = 0;
-        let savedCalls = 0;
+        for (let i = 0; i < allPoints.length; i++) {
+            const origin = allPoints[i];
+            if (!matrix[origin.id]) matrix[origin.id] = {};
 
-        // STRATEGIE 1: Nur Home zu Cluster-Zentren (statt zu jedem Termin!)
-        for (const cluster of clusters) {
-            if (cluster.appointments.length === 0) continue;
+            for (let j = 0; j < allPoints.length; j++) {
+                const dest = allPoints[j];
+                if (origin.id === dest.id) continue;
 
-            const center = cluster.center;
+                const originsStr = `${origin.lat},${origin.lng}`;
+                const destStr = `${dest.lat},${dest.lng}`;
 
-            // API Call nur für Cluster-Zentrum
-            try {
-                const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
-                    params: {
-                        origins: `${homePoint.lat},${homePoint.lng}`,
-                        destinations: `${center.lat},${center.lng}`,
-                        key: apiKey,
-                        units: 'metric',
-                        mode: 'driving'
-                    },
-                    timeout: 5000
-                });
+                try {
+                    const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
+                        params: {
+                            origins: originsStr,
+                            destinations: destStr,
+                            key: apiKey,
+                            units: 'metric',
+                            mode: 'driving'
+                        },
+                        timeout: 5000
+                    });
 
-                if (response.data.status === 'OK') {
-                    const element = response.data.rows[0].elements[0];
-                    if (element.status === 'OK') {
-                        const distance = element.distance.value / 1000;
-                        const duration = element.duration.value / 3600;
-
-                        // Speichere für Cluster-Zentrum
-                        if (!matrix['home']) matrix['home'] = {};
-                        if (!matrix[center.id]) matrix[center.id] = {};
-
-                        matrix['home'][center.id] = { distance, duration: duration + 0.25 };
-                        matrix[center.id]['home'] = { distance, duration: duration + 0.25 };
-
-                        // WICHTIG: Verwende diese Werte für ALLE Termine im Cluster!
-                        cluster.appointments.forEach(apt => {
-                            if (!matrix['home']) matrix['home'] = {};
-                            if (!matrix[apt.id]) matrix[apt.id] = {};
-
-                            // Kleine Variation für Realismus
-                            const variation = 0.1 + Math.random() * 0.1;
-                            matrix['home'][apt.id] = {
-                                distance: distance * (1 + variation),
-                                duration: (duration + 0.25) * (1 + variation),
-                                approximated: true
+                    if (response.data.status === 'OK') {
+                        const element = response.data.rows[0].elements[0];
+                        if (element.status === 'OK') {
+                            matrix[origin.id][dest.id] = {
+                                distance: element.distance.value / 1000,
+                                duration: (element.duration.value / 3600) + this.constraints.travelTimePadding
                             };
-                            matrix[apt.id]['home'] = {
-                                distance: distance * (1 + variation),
-                                duration: (duration + 0.25) * (1 + variation),
-                                approximated: true
-                            };
-                            savedCalls++;
-                        });
-
-                        apiCalls++;
-                        console.log(`✅ Cluster ${cluster.id}: 1 API Call für ${cluster.appointments.length} Termine`);
+                        }
                     }
+
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                } catch (err) {
+                    console.error('❌ Distance Matrix Fehler:', err.message);
                 }
-
-                await new Promise(resolve => setTimeout(resolve, 200));
-
-            } catch (error) {
-                console.error(`❌ API Fehler für Cluster ${cluster.id}:`, error.message);
             }
         }
-
-        // STRATEGIE 2: Innerhalb der Cluster nur Approximation (KEINE API CALLS!)
-        appointments.forEach(from => {
-            if (!matrix[from.id]) matrix[from.id] = {};
-
-            appointments.forEach(to => {
-                if (from.id !== to.id && !matrix[from.id][to.id]) {
-                    const distance = this.calculateHaversineDistance(
-                        { lat: from.lat, lng: from.lng },
-                        { lat: to.lat, lng: to.lng }
-                    );
-
-                    // Realistische Fahrzeit-Schätzung
-                    let duration;
-                    if (distance < 50) {
-                        duration = distance / 60; // Stadtverkehr
-                    } else if (distance < 200) {
-                        duration = distance / 80; // Landstraße
-                    } else {
-                        duration = distance / 100; // Autobahn
-                    }
-
-                    matrix[from.id][to.id] = {
-                        distance: distance,
-                        duration: duration + 0.25,
-                        approximated: true
-                    };
-                    savedCalls++;
-                }
-            });
-        });
-
-        console.log(`\n💰 === KOSTEN-BERICHT ===`);
-        console.log(`✅ API Calls: ${apiCalls} (${(apiCalls * 0.01).toFixed(2)}€)`);
-        console.log(`💾 Approximiert: ${savedCalls} (0€)`);
-        console.log(`📊 Einsparung: ${Math.round((savedCalls / (apiCalls + savedCalls)) * 100)}%`);
-        console.log(`💶 Geschätzte Kosten: ${(apiCalls * 0.01).toFixed(2)}€ statt ${((apiCalls + savedCalls) * 0.01).toFixed(2)}€`);
-        console.log(`========================\n`);
 
         return matrix;
     }
