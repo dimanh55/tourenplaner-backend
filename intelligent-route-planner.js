@@ -168,16 +168,17 @@ class IntelligentRoutePlanner {
 
         // Home-Base
         const homePoint = { id: 'home', ...this.constraints.homeBase };
-        
+        const allPoints = [homePoint, ...appointments];
+
         let apiCalls = 0;
         let savedCalls = 0;
 
         // STRATEGIE 1: Nur Home zu Cluster-Zentren (statt zu jedem Termin!)
         for (const cluster of clusters) {
             if (cluster.appointments.length === 0) continue;
-            
+
             const center = cluster.center;
-            
+
             // API Call nur für Cluster-Zentrum
             try {
                 const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
@@ -196,41 +197,41 @@ class IntelligentRoutePlanner {
                     if (element.status === 'OK') {
                         const distance = element.distance.value / 1000;
                         const duration = element.duration.value / 3600;
-                        
+
                         // Speichere für Cluster-Zentrum
                         if (!matrix['home']) matrix['home'] = {};
                         if (!matrix[center.id]) matrix[center.id] = {};
-                        
+
                         matrix['home'][center.id] = { distance, duration: duration + 0.25 };
                         matrix[center.id]['home'] = { distance, duration: duration + 0.25 };
-                        
+
                         // WICHTIG: Verwende diese Werte für ALLE Termine im Cluster!
                         cluster.appointments.forEach(apt => {
                             if (!matrix['home']) matrix['home'] = {};
                             if (!matrix[apt.id]) matrix[apt.id] = {};
-                            
+
                             // Kleine Variation für Realismus
                             const variation = 0.1 + Math.random() * 0.1;
-                            matrix['home'][apt.id] = { 
-                                distance: distance * (1 + variation), 
+                            matrix['home'][apt.id] = {
+                                distance: distance * (1 + variation),
                                 duration: (duration + 0.25) * (1 + variation),
-                                approximated: true 
+                                approximated: true
                             };
-                            matrix[apt.id]['home'] = { 
-                                distance: distance * (1 + variation), 
+                            matrix[apt.id]['home'] = {
+                                distance: distance * (1 + variation),
                                 duration: (duration + 0.25) * (1 + variation),
-                                approximated: true 
+                                approximated: true
                             };
                             savedCalls++;
                         });
-                        
+
                         apiCalls++;
                         console.log(`✅ Cluster ${cluster.id}: 1 API Call für ${cluster.appointments.length} Termine`);
                     }
                 }
-                
+
                 await new Promise(resolve => setTimeout(resolve, 200));
-                
+
             } catch (error) {
                 console.error(`❌ API Fehler für Cluster ${cluster.id}:`, error.message);
             }
@@ -239,14 +240,14 @@ class IntelligentRoutePlanner {
         // STRATEGIE 2: Innerhalb der Cluster nur Approximation (KEINE API CALLS!)
         appointments.forEach(from => {
             if (!matrix[from.id]) matrix[from.id] = {};
-            
+
             appointments.forEach(to => {
                 if (from.id !== to.id && !matrix[from.id][to.id]) {
                     const distance = this.calculateHaversineDistance(
                         { lat: from.lat, lng: from.lng },
                         { lat: to.lat, lng: to.lng }
                     );
-                    
+
                     // Realistische Fahrzeit-Schätzung
                     let duration;
                     if (distance < 50) {
@@ -256,7 +257,7 @@ class IntelligentRoutePlanner {
                     } else {
                         duration = distance / 100; // Autobahn
                     }
-                    
+
                     matrix[from.id][to.id] = {
                         distance: distance,
                         duration: duration + 0.25,
