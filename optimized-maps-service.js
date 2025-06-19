@@ -10,6 +10,9 @@ const EnhancedGeocodingService = require('./geocoding-service');
 class UltraOptimizedMapsService {
     constructor(dbInstance) {
         this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
+        if (!this.apiKey) {
+            throw new Error('Google Maps API Key nicht konfiguriert');
+        }
         this.db = dbInstance;
         
         // Persistent Caches
@@ -499,7 +502,7 @@ class UltraOptimizedMapsService {
     async batchDistanceMatrix(connections, allPoints, matrix) {
         if (connections.length === 0) return;
         
-        const maxBatchSize = 25; // Google Limit: 25x25
+        const maxBatchSize = 100; // Größere Batches zur Kostensenkung
         
         for (let i = 0; i < connections.length; i += maxBatchSize) {
             const batch = connections.slice(i, i + maxBatchSize);
@@ -523,16 +526,38 @@ class UltraOptimizedMapsService {
     async callDistanceMatrixAPI(originIds, destinationIds, allPoints, matrix) {
         const pointsMap = new Map(allPoints.map(p => [p.id, p]));
         
-        const originsCoords = originIds.map(id => {
+        const originList = [];
+        const destList = [];
+        const neededPairs = [];
+
+        for (const oId of originIds) {
+            for (const dId of destinationIds) {
+                const origin = pointsMap.get(oId);
+                const dest = pointsMap.get(dId);
+                const cached = await this.getCachedDistance(origin, dest);
+                if (cached) {
+                    if (!matrix[oId]) matrix[oId] = {};
+                    matrix[oId][dId] = { distance: cached.distance, duration: cached.duration };
+                } else {
+                    neededPairs.push({ oId, dId, origin, dest });
+                    if (!originList.includes(oId)) originList.push(oId);
+                    if (!destList.includes(dId)) destList.push(dId);
+                }
+            }
+        }
+
+        if (neededPairs.length === 0) return;
+
+        const originsCoords = originList.map(id => {
             const point = pointsMap.get(id);
             return `${point.lat},${point.lng}`;
         }).join('|');
-        
-        const destinationsCoords = destinationIds.map(id => {
+
+        const destinationsCoords = destList.map(id => {
             const point = pointsMap.get(id);
             return `${point.lat},${point.lng}`;
         }).join('|');
-        
+
         const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
             params: {
                 origins: originsCoords,
@@ -540,28 +565,26 @@ class UltraOptimizedMapsService {
                 key: this.apiKey,
                 units: 'metric',
                 mode: 'driving',
-                avoid: 'tolls',
-                departure_time: 'now'
+                avoid: 'tolls'
             },
             timeout: 15000
         });
-        
+
         if (response.data.status === 'OK') {
             response.data.rows.forEach((row, i) => {
-                const originId = originIds[i];
+                const originId = originList[i];
                 if (!matrix[originId]) matrix[originId] = {};
-                
+
                 row.elements.forEach((element, j) => {
-                    const destId = destinationIds[j];
-                    
+                    const destId = destList[j];
+
                     if (element.status === 'OK') {
-                        matrix[originId][destId] = {
-                            distance: element.distance.value / 1000,
-                            duration: (element.duration.value / 3600) + 0.25,
-                            duration_in_traffic: element.duration_in_traffic ?
-                                (element.duration_in_traffic.value / 3600) + 0.25 :
-                                (element.duration.value / 3600) + 0.25
-                        };
+                        const distance = element.distance.value / 1000;
+                        const duration = (element.duration.value / 3600) + 0.25;
+                        matrix[originId][destId] = { distance, duration };
+                        const origin = pointsMap.get(originId);
+                        const dest = pointsMap.get(destId);
+                        this.saveDistanceToCache(origin, dest, distance, duration);
                     }
                 });
             });
@@ -650,7 +673,7 @@ class UltraOptimizedMapsService {
     
     loadPersistentCache() {
         if (!this.db) return;
-        
+
         // Lade Geocoding Cache aus DB
         this.db.all(`
             SELECT address, lat, lng 
@@ -668,6 +691,66 @@ class UltraOptimizedMapsService {
                 console.log(`📋 ${rows.length} Adressen aus DB in Cache geladen`);
             }
         });
+
+        // Lade Distance Cache aus DB
+        this.db.all(
+            `SELECT origin_lat, origin_lng, dest_lat, dest_lng, distance, duration FROM distance_cache`,
+            (err, rows) => {
+                if (!err && rows) {
+                    rows.forEach(row => {
+                        const key = this.getDistanceCacheKey(row.origin_lat, row.origin_lng, row.dest_lat, row.dest_lng);
+                        this.distanceCache.set(key, {
+                            distance: row.distance,
+                            duration: row.duration
+                        });
+                    });
+                    console.log(`📋 ${rows.length} Distanzen aus DB in Cache geladen`);
+                }
+            }
+        );
+    }
+
+    getDistanceCacheKey(oLat, oLng, dLat, dLng) {
+        return `${oLat},${oLng}|${dLat},${dLng}`;
+    }
+
+    getCachedDistance(origin, dest) {
+        return new Promise((resolve, reject) => {
+            const key = this.getDistanceCacheKey(origin.lat, origin.lng, dest.lat, dest.lng);
+            if (this.distanceCache.has(key)) {
+                this.apiUsage.cacheHits++;
+                resolve(this.distanceCache.get(key));
+            } else if (this.db) {
+                this.db.get(
+                    `SELECT distance, duration FROM distance_cache WHERE origin_lat=? AND origin_lng=? AND dest_lat=? AND dest_lng=?`,
+                    [origin.lat, origin.lng, dest.lat, dest.lng],
+                    (err, row) => {
+                        if (err) reject(err); else {
+                            if (row) {
+                                this.distanceCache.set(key, { distance: row.distance, duration: row.duration });
+                                this.apiUsage.cacheHits++;
+                                resolve({ distance: row.distance, duration: row.duration });
+                            } else {
+                                resolve(null);
+                            }
+                        }
+                    }
+                );
+            } else {
+                resolve(null);
+            }
+        });
+    }
+
+    saveDistanceToCache(origin, dest, distance, duration) {
+        const key = this.getDistanceCacheKey(origin.lat, origin.lng, dest.lat, dest.lng);
+        this.distanceCache.set(key, { distance, duration });
+        if (this.db) {
+            this.db.run(
+                `INSERT OR REPLACE INTO distance_cache (origin_lat, origin_lng, dest_lat, dest_lng, distance, duration, cached_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+                [origin.lat, origin.lng, dest.lat, dest.lng, distance, duration]
+            );
+        }
     }
     
     normalizeAddress(address) {

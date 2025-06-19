@@ -5,8 +5,8 @@ WORKDIR /app
 COPY package*.json ./
 # Avoid npm warning about deprecated production flag
 ENV NPM_CONFIG_PRODUCTION=false
-# Provide default Google Maps API key
-ENV GOOGLE_MAPS_API_KEY="AIzaSyD6D4OGAfep-u-N1yz_F--jacBFs1TINR4"
+# Google Maps API key must be provided at runtime
+ENV GOOGLE_MAPS_API_KEY=""
 RUN npm ci --omit=dev
 
 COPY . .
