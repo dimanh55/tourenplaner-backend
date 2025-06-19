@@ -256,58 +256,156 @@ class IntelligentRoutePlanner {
     // ======================================================================
     async getDistance(from, to) {
         const cacheKey = `${from.lat},${from.lng}-${to.lat},${to.lng}`;
-        
-        // Cache prüfen
+
         if (this.distanceCache.has(cacheKey)) {
             return this.distanceCache.get(cacheKey);
         }
-        
-        // Haversine-Approximation für kurze Distanzen
+
+        const dbCached = await this.getDistanceFromDB(from, to);
+        if (dbCached) {
+            this.distanceCache.set(cacheKey, dbCached);
+            return dbCached;
+        }
+
         const directDistance = this.haversineDistance(from.lat, from.lng, to.lat, to.lng);
-        if (directDistance < 20) {
+
+        if (directDistance < 5) {
             const result = {
-                distance: directDistance * 1.3, // Straßenfaktor
-                duration: directDistance / 60 + 0.25 // ~60km/h + Puffer
+                distance: directDistance * 1.4,
+                duration: (directDistance / 30) + 0.1,
+                approximated: true
             };
             this.distanceCache.set(cacheKey, result);
+            this.saveDistanceToDB(from, to, result);
             return result;
         }
-        
-        // Nur für längere Strecken: Google API
+
+        if (directDistance < 50) {
+            const result = {
+                distance: directDistance * 1.25,
+                duration: (directDistance / 60) + 0.2,
+                approximated: true
+            };
+            this.distanceCache.set(cacheKey, result);
+            this.saveDistanceToDB(from, to, result);
+            return result;
+        }
+
+        const similarRoute = await this.findSimilarRoute(from, to);
+        if (similarRoute) {
+            const adjustedResult = {
+                distance: similarRoute.distance * (0.9 + Math.random() * 0.2),
+                duration: similarRoute.duration * (0.9 + Math.random() * 0.2),
+                approximated: true,
+                basedOn: 'similar_route'
+            };
+            this.distanceCache.set(cacheKey, adjustedResult);
+            this.saveDistanceToDB(from, to, adjustedResult);
+            return adjustedResult;
+        }
+
         try {
             this.apiCallsCount++;
+            console.log(`🌐 API Call #${this.apiCallsCount} für ${Math.round(directDistance)}km Strecke`);
+
             const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
                 params: {
                     origins: `${from.lat},${from.lng}`,
                     destinations: `${to.lat},${to.lng}`,
                     key: this.apiKey,
                     units: 'metric',
-                    mode: 'driving'
+                    mode: 'driving',
+                    avoid: 'tolls',
+                    departure_time: 'now',
+                    traffic_model: 'pessimistic'
                 }
             });
-            
+
             if (response.data.status === 'OK') {
                 const element = response.data.rows[0].elements[0];
                 if (element.status === 'OK') {
                     const result = {
                         distance: element.distance.value / 1000,
-                        duration: element.duration.value / 3600 + this.constraints.travelTimePadding
+                        duration: (element.duration_in_traffic?.value || element.duration.value) / 3600 + 0.25,
+                        realtime: true,
+                        traffic_considered: !!element.duration_in_traffic
                     };
                     this.distanceCache.set(cacheKey, result);
+                    this.saveDistanceToDB(from, to, result);
                     return result;
                 }
             }
         } catch (error) {
-            console.warn('Distance Matrix API Fehler, nutze Approximation');
+            console.warn('⚠️ Distance Matrix API Fehler:', error.message);
         }
-        
-        // Fallback: Realistische Approximation
-        const result = {
+
+        const fallbackResult = {
             distance: directDistance * 1.3,
-            duration: directDistance / 85 + 0.25 // Autobahn-Geschwindigkeit
+            duration: directDistance / 80 + 0.3,
+            approximated: true,
+            fallback: true
         };
-        this.distanceCache.set(cacheKey, result);
-        return result;
+        this.distanceCache.set(cacheKey, fallbackResult);
+        this.saveDistanceToDB(from, to, fallbackResult);
+        return fallbackResult;
+    }
+
+    async getDistanceFromDB(from, to) {
+        return new Promise((resolve) => {
+            this.db.get(
+                `SELECT distance, duration FROM distance_cache 
+                 WHERE origin_lat = ? AND origin_lng = ? 
+                 AND dest_lat = ? AND dest_lng = ?
+                 AND cached_at > datetime('now', '-30 days')`,
+                [from.lat, from.lng, to.lat, to.lng],
+                (err, row) => {
+                    if (err || !row) {
+                        resolve(null);
+                    } else {
+                        resolve({
+                            distance: row.distance,
+                            duration: row.duration,
+                            cached: true
+                        });
+                    }
+                }
+            );
+        });
+    }
+
+    async saveDistanceToDB(from, to, result) {
+        this.db.run(
+            `INSERT OR REPLACE INTO distance_cache 
+             (origin_lat, origin_lng, dest_lat, dest_lng, distance, duration, cached_at)
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+            [from.lat, from.lng, to.lat, to.lng, result.distance, result.duration],
+            (err) => {
+                if (err) console.error('Cache-Speicherfehler:', err);
+            }
+        );
+    }
+
+    async findSimilarRoute(from, to) {
+        return new Promise((resolve) => {
+            this.db.get(
+                `SELECT distance, duration FROM distance_cache 
+                 WHERE ABS(origin_lat - ?) < 0.02 AND ABS(origin_lng - ?) < 0.02
+                 AND ABS(dest_lat - ?) < 0.02 AND ABS(dest_lng - ?) < 0.02
+                 AND cached_at > datetime('now', '-30 days')
+                 LIMIT 1`,
+                [from.lat, from.lng, to.lat, to.lng],
+                (err, row) => {
+                    if (err || !row) {
+                        resolve(null);
+                    } else {
+                        resolve({
+                            distance: row.distance,
+                            duration: row.duration
+                        });
+                    }
+                }
+            );
+        });
     }
 
     // ======================================================================

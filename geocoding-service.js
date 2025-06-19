@@ -6,7 +6,7 @@
 const axios = require('axios');
 
 class EnhancedGeocodingService {
-    constructor() {
+    constructor(dbInstance) {
         this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
         if (!this.apiKey) {
             throw new Error('Google Maps API Key nicht konfiguriert');
@@ -14,6 +14,7 @@ class EnhancedGeocodingService {
         this.requestCount = 0;
         this.cache = new Map(); // Simple in-memory cache
         this.googleApiDisabled = false;
+        this.db = dbInstance;
         
         // Deutsche Städte mit präzisen Koordinaten
         this.germanCitiesDatabase = new Map([
@@ -120,10 +121,16 @@ class EnhancedGeocodingService {
         const cleanAddress = address.trim();
         const cacheKey = cleanAddress.toLowerCase();
 
-        // Cache prüfen
         if (this.cache.has(cacheKey)) {
-            console.log(`📋 Cache Hit: ${address}`);
+            console.log(`📋 Memory Cache Hit: ${address}`);
             return this.cache.get(cacheKey);
+        }
+
+        const dbCached = await this.getGeocodingFromDB(cleanAddress);
+        if (dbCached) {
+            console.log(`💾 DB Cache Hit: ${address}`);
+            this.cache.set(cacheKey, dbCached);
+            return dbCached;
         }
 
         console.log(`🔍 Geocoding: ${address}`);
@@ -174,9 +181,12 @@ class EnhancedGeocodingService {
             processed_at: new Date().toISOString()
         };
 
-        // In Cache speichern
         this.cache.set(cacheKey, enrichedResult);
-        
+
+        if (result) {
+            this.saveGeocodingToDB(cleanAddress, enrichedResult);
+        }
+
         return enrichedResult;
     }
 
@@ -555,6 +565,55 @@ class EnhancedGeocodingService {
             requestCount: this.requestCount,
             hitRate: this.cache.size > 0 ? (this.cache.size / this.requestCount) * 100 : 0
         };
+    }
+
+    async getGeocodingFromDB(address) {
+        if (!this.db) return null;
+
+        return new Promise((resolve) => {
+            this.db.get(
+                `SELECT lat, lng, formatted_address, accuracy, method 
+                 FROM geocoding_cache 
+                 WHERE address = ? 
+                 AND cached_at > datetime('now', '-90 days')`,
+                [address.toLowerCase()],
+                (err, row) => {
+                    if (err || !row) {
+                        resolve(null);
+                    } else {
+                        resolve({
+                            lat: row.lat,
+                            lng: row.lng,
+                            formatted_address: row.formatted_address,
+                            accuracy: row.accuracy,
+                            geocoding_method: row.method,
+                            cached: true
+                        });
+                    }
+                }
+            );
+        });
+    }
+
+    async saveGeocodingToDB(address, result) {
+        if (!this.db) return;
+
+        this.db.run(
+            `INSERT OR REPLACE INTO geocoding_cache 
+             (address, lat, lng, formatted_address, accuracy, method, cached_at)
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+            [
+                address.toLowerCase(),
+                result.lat,
+                result.lng,
+                result.formatted_address || '',
+                result.accuracy || 'unknown',
+                result.geocoding_method || 'unknown'
+            ],
+            (err) => {
+                if (err) console.error('Geocoding Cache-Speicherfehler:', err);
+            }
+        );
     }
 
     // ======================================================================

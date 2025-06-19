@@ -11,6 +11,7 @@ require('dotenv').config();
 // INTELLIGENTE ROUTENPLANUNG KLASSE (Aus separater Datei importiert)
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
+const UltraOptimizedMapsService = require('./optimized-maps-service');
 
 // Soll der UltraOptimizedMapsService genutzt werden?
 const USE_OPTIMIZED_SERVICE = true;
@@ -187,6 +188,25 @@ function initializeDatabase() {
             console.log('✅ Distance Cache Tabelle erstellt/verifiziert');
         }
     });
+
+    db.run(`CREATE TABLE IF NOT EXISTS geocoding_cache (
+        address TEXT PRIMARY KEY,
+        lat REAL NOT NULL,
+        lng REAL NOT NULL,
+        formatted_address TEXT,
+        accuracy TEXT,
+        method TEXT,
+        cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`, (err) => {
+        if (err) {
+            console.error('❌ Geocoding Cache Tabelle konnte nicht erstellt werden:', err);
+        } else {
+            console.log('✅ Geocoding Cache Tabelle erstellt/verifiziert');
+        }
+    });
+
+    db.run(`CREATE INDEX IF NOT EXISTS idx_geocoding_cache_address 
+            ON geocoding_cache(address)`);
 
     // Optional: Index für schnellere Suche
     db.run(`CREATE INDEX IF NOT EXISTS idx_distance_cache_coords 
@@ -999,89 +1019,170 @@ async function selectMaxAppointmentsForWeek(allAppointments, weekStart) {
 // ======================================================================
 
 async function performMaxEfficiencyOptimization(appointments, weekStart, driverId) {
-    console.log('⚡ Standard Routenplanung (ohne Optimized Service)...');
+    console.log('⚡ ULTRA-OPTIMIERTE Routenplanung mit minimalem API-Verbrauch...');
 
     try {
-        const planner = new IntelligentRoutePlanner(db);
-        const optimizedRoute = await planner.optimizeWeek(appointments, weekStart, driverId || 1);
+        if (USE_OPTIMIZED_SERVICE) {
+            const optimizedService = new UltraOptimizedMapsService(db);
 
-        return {
-            ...optimizedRoute,
-            optimization: 'standard_planner',
-            api_usage: {
-                geocoding_requests: 0,
-                distance_matrix_requests: 0,
-                cache_hits: 0,
-                estimated_cost_usd: 0,
-                note: 'Using standard planner instead of optimized service'
-            }
-        };
+            const geocodedAppointments = await optimizedService.smartGeocodeBatch(appointments);
+            console.log(`✅ ${geocodedAppointments.length} Termine geocoded`);
+
+            const distanceMatrix = await optimizedService.calculateSmartDistanceMatrix(geocodedAppointments);
+
+            const planner = new IntelligentRoutePlanner(db);
+            planner.distanceCache = new Map();
+            Object.entries(distanceMatrix).forEach(([from, destinations]) => {
+                Object.entries(destinations).forEach(([to, data]) => {
+                    const fromApt = geocodedAppointments.find(a => a.id === from) || { lat: 52.3759, lng: 9.7320 };
+                    const toApt = geocodedAppointments.find(a => a.id === to) || { lat: 52.3759, lng: 9.7320 };
+                    const cacheKey = `${fromApt.lat},${fromApt.lng}-${toApt.lat},${toApt.lng}`;
+                    planner.distanceCache.set(cacheKey, {
+                        distance: data.distance,
+                        duration: data.duration
+                    });
+                });
+            });
+
+            planner.apiCallsCount = 0;
+            const optimizedRoute = await planner.optimizeWeek(geocodedAppointments, weekStart, driverId || 1);
+
+            const apiStats = optimizedService.getOptimizationStats();
+
+            return {
+                ...optimizedRoute,
+                optimization: 'ultra_optimized',
+                api_usage: {
+                    geocoding_requests: apiStats.geocoding_calls,
+                    distance_matrix_requests: apiStats.distance_matrix_calls,
+                    cache_hits: apiStats.cache_hits,
+                    total_saved: apiStats.api_calls_saved,
+                    efficiency_percentage: apiStats.efficiency_percentage,
+                    estimated_cost_usd: apiStats.estimated_cost_usd,
+                    estimated_savings_usd: apiStats.estimated_savings_usd
+                }
+            };
+
+        } else {
+            const planner = new IntelligentRoutePlanner(db);
+            return await planner.optimizeWeek(appointments, weekStart, driverId || 1);
+        }
 
     } catch (error) {
-        console.error('❌ Standard Planung fehlgeschlagen:', error);
+        console.error('❌ Optimierte Planung fehlgeschlagen:', error);
         throw error;
     }
 }
 
+async function findSmartAlternativeSlots(appointmentId, weekStart) {
+    const optimizedService = new UltraOptimizedMapsService(db);
+
+    const appointment = await new Promise((resolve, reject) => {
+        db.get("SELECT * FROM appointments WHERE id = ?", [appointmentId],
+            (err, row) => err ? reject(err) : resolve(row)
+        );
+    });
+
+    if (!appointment) throw new Error('Termin nicht gefunden');
+
+    const savedRoute = await new Promise((resolve, reject) => {
+        db.get(
+            "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
+            [weekStart],
+            (err, row) => err ? reject(err) : resolve(row)
+        );
+    });
+
+    if (!savedRoute) {
+        return {
+            success: false,
+            message: 'Keine aktive Route für diese Woche',
+            alternatives: []
+        };
+    }
+
+    const weekPlan = JSON.parse(savedRoute.route_data);
+
+    const alternatives = await optimizedService.suggestAlternativeSlots(
+        appointment,
+        weekPlan
+    );
+
+    return alternatives;
+}
+
 // Stelle sicher, dass alle Termine Koordinaten haben
 async function ensureAllAppointmentsGeocoded(appointments) {
+    if (USE_OPTIMIZED_SERVICE) {
+        const optimizedService = new UltraOptimizedMapsService(db);
+        const geocoded = await optimizedService.smartGeocodeBatch(appointments);
+
+        for (const apt of geocoded) {
+            if (apt.geocoded && apt.lat && apt.lng) {
+                await new Promise((resolve, reject) => {
+                    db.run(
+                        "UPDATE appointments SET lat = ?, lng = ?, geocoded = 1 WHERE id = ?",
+                        [apt.lat, apt.lng, apt.id],
+                        err => err ? reject(err) : resolve()
+                    );
+                });
+            }
+        }
+
+        return geocoded.filter(apt => apt.lat && apt.lng);
+    }
+
     const needsGeocoding = appointments.filter(apt => !apt.lat || !apt.lng);
-    
+
     if (needsGeocoding.length > 0) {
         console.log(`🗺️ Geocoding ${needsGeocoding.length} Termine...`);
-        
+
         const apiKey = process.env.GOOGLE_MAPS_API_KEY;
         if (!apiKey) {
             throw new Error('Google Maps API Key nicht konfiguriert');
         }
-        
-        for (const apt of needsGeocoding) {
-            try {
-                const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
-                    params: {
-                        address: apt.address,
-                        key: apiKey,
-                        region: 'de',
-                        components: 'country:DE'
-                    },
-                    timeout: 5000
-                });
-                
-                if (response.data.status === 'OK' && response.data.results.length > 0) {
-                    const location = response.data.results[0].geometry.location;
-                    apt.lat = location.lat;
-                    apt.lng = location.lng;
-                    apt.geocoded = true;
-                    
-                    // Update in Datenbank
-                    await new Promise((resolve, reject) => {
-                        db.run(
-                            "UPDATE appointments SET lat = ?, lng = ?, geocoded = 1 WHERE id = ?",
-                            [location.lat, location.lng, apt.id],
-                            err => err ? reject(err) : resolve()
-                        );
+
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < needsGeocoding.length; i += BATCH_SIZE) {
+            const batch = needsGeocoding.slice(i, i + BATCH_SIZE);
+
+            await Promise.all(batch.map(async (apt) => {
+                try {
+                    const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+                        params: {
+                            address: apt.address,
+                            key: apiKey,
+                            region: 'de',
+                            components: 'country:DE'
+                        },
+                        timeout: 5000
                     });
-                    
-                    console.log(`✅ Geocoded: ${apt.customer}`);
+
+                    if (response.data.status === 'OK' && response.data.results.length > 0) {
+                        const location = response.data.results[0].geometry.location;
+                        apt.lat = location.lat;
+                        apt.lng = location.lng;
+                        apt.geocoded = true;
+
+                        await new Promise((resolve, reject) => {
+                            db.run(
+                                "UPDATE appointments SET lat = ?, lng = ?, geocoded = 1 WHERE id = ?",
+                                [location.lat, location.lng, apt.id],
+                                err => err ? reject(err) : resolve()
+                            );
+                        });
+                    }
+                } catch (error) {
+                    console.warn(`⚠️ Geocoding fehlgeschlagen für ${apt.customer}:`, error.message);
                 }
-                
-                // Pause zwischen Requests
-                await new Promise(resolve => setTimeout(resolve, 200));
-                
-            } catch (error) {
-                console.warn(`⚠️ Geocoding fehlgeschlagen für ${apt.customer}:`, error.message);
-                // Verwende Fallback-Koordinaten basierend auf PLZ
-                const fallback = getFallbackCoordinatesFromAddress(apt.address);
-                if (fallback) {
-                    apt.lat = fallback.lat;
-                    apt.lng = fallback.lng;
-                    apt.geocoded = false;
-                }
+            }));
+
+            if (i + BATCH_SIZE < needsGeocoding.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
             }
         }
     }
-    
-    // Filtere Termine ohne Koordinaten
+
     return appointments.filter(apt => apt.lat && apt.lng);
 }
 
@@ -1463,6 +1564,70 @@ function calculateDistance(lat1, lng1, lat2, lng2) {
 function estimateTravelTime(lat1, lng1, lat2, lng2) {
     const distance = calculateDistance(lat1, lng1, lat2, lng2);
     return Math.max(0.25, distance / 85) + 0.25; // basic padding
+}
+
+async function batchCalculateDistances(origins, destinations) {
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    const MAX_ELEMENTS = 100;
+    const MAX_ORIGINS = 25;
+    const MAX_DESTINATIONS = 25;
+
+    const results = {};
+
+    for (let i = 0; i < origins.length; i += MAX_ORIGINS) {
+        const originBatch = origins.slice(i, i + MAX_ORIGINS);
+
+        for (let j = 0; j < destinations.length; j += MAX_DESTINATIONS) {
+            const destBatch = destinations.slice(j, j + MAX_DESTINATIONS);
+
+            if (originBatch.length * destBatch.length > MAX_ELEMENTS) {
+                continue;
+            }
+
+            const originsStr = originBatch.map(o => `${o.lat},${o.lng}`).join('|');
+            const destsStr = destBatch.map(d => `${d.lat},${d.lng}`).join('|');
+
+            try {
+                const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
+                    params: {
+                        origins: originsStr,
+                        destinations: destsStr,
+                        key: apiKey,
+                        units: 'metric',
+                        mode: 'driving',
+                        departure_time: 'now',
+                        traffic_model: 'best_guess'
+                    }
+                });
+
+                if (response.data.status === 'OK') {
+                    response.data.rows.forEach((row, rowIdx) => {
+                        const origin = originBatch[rowIdx];
+                        if (!results[origin.id]) results[origin.id] = {};
+
+                        row.elements.forEach((element, colIdx) => {
+                            const dest = destBatch[colIdx];
+                            if (element.status === 'OK') {
+                                results[origin.id][dest.id] = {
+                                    distance: element.distance.value / 1000,
+                                    duration: element.duration_in_traffic ?
+                                        element.duration_in_traffic.value / 3600 :
+                                        element.duration.value / 3600
+                                };
+                            }
+                        });
+                    });
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+            } catch (error) {
+                console.error('Distance Matrix Batch Error:', error.message);
+            }
+        }
+    }
+
+    return results;
 }
 
 function extractCityFromAddress(address) {
@@ -3482,97 +3647,41 @@ app.delete('/api/appointments/fixed/:id', validateSession, async (req, res) => {
 
 // Alternative Terminvorschläge für abgelehnte Termine
 app.post('/api/appointments/suggest-alternatives', validateSession, async (req, res) => {
-    const { appointmentId, reason = 'customer_rejected' } = req.body;
+    const { appointmentId, weekStart, reason = 'customer_rejected' } = req.body;
 
     if (!appointmentId) {
         return res.status(400).json({ error: 'appointmentId is required' });
     }
 
     try {
-        // Lade den abgelehnten Termin
-        const appointment = await new Promise((resolve, reject) => {
-            db.get(
-                "SELECT * FROM appointments WHERE id = ?",
-                [appointmentId],
-                (err, row) => (err ? reject(err) : resolve(row))
-            );
-        });
+        const alternatives = await findSmartAlternativeSlots(
+            appointmentId,
+            weekStart || new Date().toISOString().split('T')[0]
+        );
 
-        if (!appointment) {
-            return res.status(404).json({ error: 'Termin nicht gefunden' });
-        }
-
-        // Lade aktuelle Wochenplanung für diese Woche
-        const currentWeek = new Date();
-        const monday = new Date(currentWeek);
-        monday.setDate(monday.getDate() - monday.getDay() + 1);
-        const weekStart = monday.toISOString().split('T')[0];
-
-        // Lade gespeicherte Route für diese Woche
-        const savedRoute = await new Promise((resolve, reject) => {
-            db.get(
-                "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
-                [weekStart],
-                (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                }
-            );
-        });
-
-        let weekPlan;
-        if (savedRoute) {
-            weekPlan = JSON.parse(savedRoute.route_data);
-        } else {
-            // Keine Route für diese Woche - erstelle leere Struktur
-            weekPlan = {
-                weekStart: weekStart,
-                days: ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'].map((day, index) => {
-                    const date = new Date(monday);
-                    date.setDate(monday.getDate() + index);
-                    return {
-                        day: day,
-                        date: date.toISOString().split('T')[0],
-                        appointments: [],
-                        travelSegments: []
-                    };
-                })
-            };
-        }
-
-        // Nutze die neue intelligente Funktion
-        const planner = new IntelligentRoutePlanner(db);
-        const alternatives = await planner.suggestAlternativeSlots(appointment, weekPlan);
-
-        // Optional: Markiere den Termin als "verschoben" oder "pending"
-        if (reason === 'customer_rejected') {
+        if (reason === 'customer_rejected' && alternatives.alternatives?.length > 0) {
             await new Promise((resolve, reject) => {
                 db.run(
                     `UPDATE appointments 
-                     SET status = 'verschoben', 
-                         notes = json_set(COALESCE(notes, '{}'), '$.rejection_reason', ?)
+                     SET status = 'umzuplanen',
+                         notes = json_set(COALESCE(notes, '{}'), '$.rejection_info', json(?))
                      WHERE id = ?`,
-                    [reason, appointmentId],
-                    (err) => (err ? reject(err) : resolve())
+                    [JSON.stringify({
+                        reason: reason,
+                        rejected_at: new Date().toISOString(),
+                        alternatives_found: alternatives.alternatives.length
+                    }), appointmentId],
+                    err => err ? reject(err) : resolve()
                 );
             });
         }
 
         res.json({
             success: true,
-            appointment: {
-                id: appointment.id,
-                customer: appointment.customer,
-                address: appointment.address,
-                originalStatus: appointment.status
-            },
-            alternatives: alternatives,
-            message: 'Alternative Terminvorschläge generiert',
-            nextSteps: [
-                'Wählen Sie eine Alternative aus',
-                'Informieren Sie den Kunden',
-                'Bestätigen Sie den neuen Termin'
-            ]
+            ...alternatives,
+            recommendation: alternatives.alternatives?.length > 0 ?
+                `${alternatives.alternatives.length} alternative Slots gefunden. Beste Option: ${alternatives.alternatives[0].day} ${alternatives.alternatives[0].startTime}` :
+                'Keine passenden Alternativen in dieser Woche. Empfehle Verschiebung in nächste Woche.'
         });
 
     } catch (error) {
@@ -3601,7 +3710,7 @@ console.log('  POST /api/appointments/suggest-alternatives - Alternative Terminv
 const EnhancedGeocodingService = require('./geocoding-service');
 
 // Service-Instanz erstellen
-const geocodingService = new EnhancedGeocodingService();
+const geocodingService = new EnhancedGeocodingService(db);
 
 // ======================================================================
 // NEUE API ROUTES FÜR GEOCODING
@@ -3865,6 +3974,184 @@ app.post('/api/geocoding/test-google', validateSession, async (req, res) => {
                 'Billing Account aktiviert?',
                 'API Quotas ausreichend?'
             ]
+        });
+    }
+});
+
+app.post('/api/admin/warm-cache', validateSession, async (req, res) => {
+    try {
+        console.log('🔥 Wärme Distance Cache auf...');
+
+        const appointments = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, address, lat, lng 
+                FROM appointments 
+                WHERE lat IS NOT NULL AND lng IS NOT NULL
+                AND (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+                LIMIT 50
+            `, (err, rows) => err ? reject(err) : resolve(rows));
+        });
+
+        const locations = [
+            { id: 'home', lat: 52.3759, lng: 9.7320, name: 'Hannover' },
+            ...appointments
+        ];
+
+        console.log(`📍 Berechne Distanzen für ${locations.length} Orte...`);
+
+        const distances = await batchCalculateDistances(locations, locations);
+
+        let savedCount = 0;
+        Object.entries(distances).forEach(([fromId, destinations]) => {
+            Object.entries(destinations).forEach(([toId, data]) => {
+                if (fromId !== toId) {
+                    savedCount++;
+                }
+            });
+        });
+
+        res.json({
+            success: true,
+            message: `Cache aufgewärmt: ${savedCount} Distanzen berechnet`,
+            locations_processed: locations.length,
+            cache_entries: savedCount
+        });
+
+    } catch (error) {
+        console.error('❌ Cache Warming fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.get('/api/admin/cache-stats', validateSession, async (req, res) => {
+    try {
+        const stats = await Promise.all([
+            new Promise((resolve, reject) => {
+                db.all(`
+                    SELECT 
+                        COUNT(*) as total_entries,
+                        COUNT(CASE WHEN cached_at > datetime('now', '-7 days') THEN 1 END) as recent_entries,
+                        COUNT(CASE WHEN cached_at > datetime('now', '-1 day') THEN 1 END) as today_entries,
+                        MIN(cached_at) as oldest_entry,
+                        MAX(cached_at) as newest_entry
+                    FROM distance_cache
+                `, (err, rows) => {
+                    if (err) reject(err);
+                    else resolve({ distance_cache: rows[0] });
+                });
+            }),
+            new Promise((resolve, reject) => {
+                db.all(`
+                    SELECT 
+                        COUNT(*) as total_entries,
+                        COUNT(CASE WHEN method = 'google_maps' THEN 1 END) as google_entries,
+                        COUNT(CASE WHEN method = 'city_database' THEN 1 END) as local_entries,
+                        COUNT(CASE WHEN method = 'intelligent_analysis' THEN 1 END) as analyzed_entries
+                    FROM geocoding_cache
+                `, (err, rows) => {
+                    if (err) reject(err);
+                    else resolve({ geocoding_cache: rows[0] });
+                });
+            }),
+            new Promise((resolve, reject) => {
+                db.all(`
+                    SELECT 
+                        COUNT(*) as total_appointments,
+                        COUNT(CASE WHEN lat IS NOT NULL AND lng IS NOT NULL THEN 1 END) as geocoded,
+                        COUNT(CASE WHEN geocoded = 1 THEN 1 END) as verified_geocoded
+                    FROM appointments
+                    WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
+                `, (err, rows) => {
+                    if (err) reject(err);
+                    else resolve({ appointments: rows[0] });
+                });
+            })
+        ]);
+
+        const avgApiCost = 0.005;
+        const potentialSavings = (stats[0].distance_cache.total_entries +
+                                 stats[1].geocoding_cache.total_entries) * avgApiCost;
+
+        res.json({
+            success: true,
+            cache_statistics: {
+                distance_cache: stats[0].distance_cache,
+                geocoding_cache: stats[1].geocoding_cache,
+                appointments: stats[2].appointments
+            },
+            efficiency: {
+                total_cached_requests: stats[0].distance_cache.total_entries +
+                                      stats[1].geocoding_cache.total_entries,
+                estimated_savings_usd: potentialSavings.toFixed(2),
+                cache_hit_potential: `${Math.round((stats[2].appointments.geocoded /
+                                     stats[2].appointments.total_appointments) * 100)}%`
+            },
+            recommendations: [
+                stats[0].distance_cache.total_entries < 100 ?
+                    '💡 Nutze /api/admin/warm-cache um Cache vorzuwärmen' :
+                    '✅ Distance Cache gut gefüllt',
+                stats[1].geocoding_cache.google_entries > stats[1].geocoding_cache.local_entries ?
+                    '⚠️ Viele Google API Calls - erweitere lokale Städte-Datenbank' :
+                    '✅ Lokale Geocoding-Optimierung funktioniert gut'
+            ]
+        });
+
+    } catch (error) {
+        console.error('❌ Cache Stats Fehler:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/admin/cleanup-cache', validateSession, async (req, res) => {
+    const { olderThanDays = 30 } = req.body;
+
+    try {
+        const results = await Promise.all([
+            new Promise((resolve, reject) => {
+                db.run(
+                    `DELETE FROM distance_cache 
+                     WHERE cached_at < datetime('now', '-' || ? || ' days')`,
+                    [olderThanDays],
+                    function(err) {
+                        if (err) reject(err);
+                        else resolve({ distance_cache_deleted: this.changes });
+                    }
+                );
+            }),
+            new Promise((resolve, reject) => {
+                db.run(
+                    `DELETE FROM geocoding_cache 
+                     WHERE cached_at < datetime('now', '-' || ? || ' days')`,
+                    [olderThanDays],
+                    function(err) {
+                        if (err) reject(err);
+                        else resolve({ geocoding_cache_deleted: this.changes });
+                    }
+                );
+            })
+        ]);
+
+        res.json({
+            success: true,
+            message: `Cache-Einträge älter als ${olderThanDays} Tage gelöscht`,
+            deleted: {
+                distance_cache: results[0].distance_cache_deleted,
+                geocoding_cache: results[1].geocoding_cache_deleted,
+                total: results[0].distance_cache_deleted + results[1].geocoding_cache_deleted
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Cache Cleanup Fehler:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
         });
     }
 });
