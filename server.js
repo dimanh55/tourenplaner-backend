@@ -12,9 +12,13 @@ require('dotenv').config();
 // ======================================================================
 const IntelligentRoutePlanner = require('./intelligent-route-planner');
 const UltraOptimizedMapsService = require('./optimized-maps-service');
+const { APIBudgetController, SmartDistanceCalculator } = require('./api-budget-controller');
 
 // Soll der UltraOptimizedMapsService genutzt werden?
 const USE_OPTIMIZED_SERVICE = true;
+
+// Budget-Controller mit 5€ Tageslimit
+const apiController = new APIBudgetController(5.0);
 
 
 // Debug: Umgebungsvariablen prüfen
@@ -1019,58 +1023,96 @@ async function selectMaxAppointmentsForWeek(allAppointments, weekStart) {
 // ======================================================================
 
 async function performMaxEfficiencyOptimization(appointments, weekStart, driverId) {
-    console.log('⚡ ULTRA-OPTIMIERTE Routenplanung mit minimalem API-Verbrauch...');
+    console.log('💰 KOSTEN-OPTIMIERTE Routenplanung mit Budget-Kontrolle...');
+    console.log(`📊 API Budget Status:`, apiController.getStatus());
 
     try {
-        if (USE_OPTIMIZED_SERVICE) {
-            const optimizedService = new UltraOptimizedMapsService(db);
+        // WICHTIG: Nutze den optimierten Service
+        const optimizedService = new UltraOptimizedMapsService(db);
 
-            const geocodedAppointments = await optimizedService.smartGeocodeBatch(appointments);
-            console.log(`✅ ${geocodedAppointments.length} Termine geocoded`);
+        // Override: Füge Budget-Check hinzu
+        const originalGeocode = optimizedService.geocodeWithGoogleMaps.bind(optimizedService);
+        optimizedService.geocodeWithGoogleMaps = async function(address) {
+            if (!apiController.canMakeAPICall('geocoding')) {
+                console.log('⚠️ Budget-Limit erreicht, nutze lokale Schätzung');
+                throw new Error('Budget limit reached');
+            }
+            apiController.registerAPICall('geocoding', 1);
+            return originalGeocode(address);
+        };
 
-            const distanceMatrix = await optimizedService.calculateSmartDistanceMatrix(geocodedAppointments);
+        // Phase 1: Smart Geocoding
+        const geocodedAppointments = await optimizedService.smartGeocodeBatch(appointments);
+        console.log(`✅ ${geocodedAppointments.length} Termine geocoded`);
 
-            const planner = new IntelligentRoutePlanner(db);
-            planner.distanceCache = new Map();
-            Object.entries(distanceMatrix).forEach(([from, destinations]) => {
-                Object.entries(destinations).forEach(([to, data]) => {
-                    const fromApt = geocodedAppointments.find(a => a.id === from) || { lat: 52.3759, lng: 9.7320 };
-                    const toApt = geocodedAppointments.find(a => a.id === to) || { lat: 52.3759, lng: 9.7320 };
-                    const cacheKey = `${fromApt.lat},${fromApt.lng}-${toApt.lat},${toApt.lng}`;
-                    planner.distanceCache.set(cacheKey, {
-                        distance: data.distance,
-                        duration: data.duration
-                    });
+        // Phase 2: Smart Distance Matrix
+        const distanceMatrix = await optimizedService.calculateSmartDistanceMatrix(geocodedAppointments);
+
+        // Phase 3: Route optimieren
+        const planner = new IntelligentRoutePlanner(db);
+
+        // Injiziere die Distanz-Daten
+        planner.distanceCache = new Map();
+        Object.entries(distanceMatrix).forEach(([from, destinations]) => {
+            Object.entries(destinations).forEach(([to, data]) => {
+                const fromApt = geocodedAppointments.find(a => a.id === from) || { lat: 52.3759, lng: 9.7320 };
+                const toApt = geocodedAppointments.find(a => a.id === to) || { lat: 52.3759, lng: 9.7320 };
+                const cacheKey = `${fromApt.lat},${fromApt.lng}-${toApt.lat},${toApt.lng}`;
+                planner.distanceCache.set(cacheKey, {
+                    distance: data.distance,
+                    duration: data.duration
                 });
             });
+        });
 
-            planner.apiCallsCount = 0;
-            const optimizedRoute = await planner.optimizeWeek(geocodedAppointments, weekStart, driverId || 1);
+        planner.apiCallsCount = 0; // Reset counter
+        const optimizedRoute = await planner.optimizeWeek(geocodedAppointments, weekStart, driverId || 1);
 
-            const apiStats = optimizedService.getOptimizationStats();
+        // Hole finale Statistiken
+        const apiStats = optimizedService.getOptimizationStats();
+        const budgetStatus = apiController.getStatus();
 
-            return {
-                ...optimizedRoute,
-                optimization: 'ultra_optimized',
-                api_usage: {
-                    geocoding_requests: apiStats.geocoding_calls,
-                    distance_matrix_requests: apiStats.distance_matrix_calls,
-                    cache_hits: apiStats.cache_hits,
-                    total_saved: apiStats.api_calls_saved,
-                    efficiency_percentage: apiStats.efficiency_percentage,
-                    estimated_cost_usd: apiStats.estimated_cost_usd,
-                    estimated_savings_usd: apiStats.estimated_savings_usd
-                }
-            };
-
-        } else {
-            const planner = new IntelligentRoutePlanner(db);
-            return await planner.optimizeWeek(appointments, weekStart, driverId || 1);
-        }
+        return {
+            ...optimizedRoute,
+            optimization: 'ultra_optimized_with_budget_control',
+            api_usage: {
+                geocoding_requests: apiStats.geocoding_calls,
+                distance_matrix_requests: apiStats.distance_matrix_calls,
+                cache_hits: apiStats.cache_hits,
+                total_saved: apiStats.api_calls_saved,
+                efficiency_percentage: apiStats.efficiency_percentage,
+                
+                // Budget-Informationen
+                estimated_cost_eur: parseFloat(budgetStatus.budget.spent),
+                daily_budget_eur: budgetStatus.budget.daily,
+                remaining_budget_eur: parseFloat(budgetStatus.budget.remaining),
+                budget_used_percentage: budgetStatus.budget.percentage,
+                
+                // Warnungen
+                warnings: budgetStatus.budget.percentage > 80 ? 
+                    ['⚠️ Über 80% des Tagesbudgets verbraucht!'] : []
+            }
+        };
 
     } catch (error) {
         console.error('❌ Optimierte Planung fehlgeschlagen:', error);
-        throw error;
+        
+        // Fallback auf rein lokale Berechnung
+        console.log('🔄 Fallback auf lokale Berechnung ohne API...');
+        const planner = new IntelligentRoutePlanner(db);
+        
+        // Override getDistance für lokale Berechnung
+        planner.getDistance = async function(from, to) {
+            const distance = this.haversineDistance(from.lat, from.lng, to.lat, to.lng);
+            return {
+                distance: distance * 1.3,
+                duration: (distance / 75) + 0.25,
+                approximated: true,
+                method: 'local_fallback'
+            };
+        };
+        
+        return await planner.optimizeWeek(appointments, weekStart, driverId || 1);
     }
 }
 
@@ -4168,6 +4210,77 @@ console.log('  POST /api/debug/test-google-maps - Google Maps API testen');
 console.log('  POST /api/debug/geocode - Adresse geocoden');
 console.log('  POST /api/debug/distance-matrix - Entfernungen berechnen');
 console.log('  POST /api/admin/fix-geocoding - Alle Termine geocoden');
+
+// Budget Status anzeigen
+app.get('/api/admin/budget-status', validateSession, (req, res) => {
+    const status = apiController.getStatus();
+
+    // Berechne geschätzte Monatskosten
+    const dailyAverage = parseFloat(status.budget.spent);
+    const monthlyEstimate = dailyAverage * 30;
+
+    res.json({
+        success: true,
+        current: status,
+        estimates: {
+            daily: dailyAverage.toFixed(2),
+            monthly: monthlyEstimate.toFixed(2),
+            yearly: (monthlyEstimate * 12).toFixed(2)
+        },
+        recommendations: [
+            status.budget.percentage > 80 ?
+                '⚠️ Tagesbudget fast aufgebraucht! Weitere Optimierungen werden lokale Berechnungen nutzen.' :
+                '✅ Budget unter Kontrolle',
+            monthlyEstimate > 100 ?
+                '💡 Tipp: Reduzieren Sie das Tagesbudget für niedrigere Monatskosten' :
+                '✅ Monatskosten im akzeptablen Bereich'
+        ]
+    });
+});
+
+// Budget anpassen
+app.post('/api/admin/set-budget', validateSession, (req, res) => {
+    const { dailyBudgetEUR } = req.body;
+
+    if (!dailyBudgetEUR || dailyBudgetEUR < 1 || dailyBudgetEUR > 50) {
+        return res.status(400).json({
+            error: 'Ungültiges Budget. Empfohlen: 1-10€ pro Tag'
+        });
+    }
+
+    // Update Budget
+    apiController.dailyBudgetEUR = dailyBudgetEUR;
+    apiController.dailyLimits = {
+        geocoding: Math.floor(dailyBudgetEUR / 0.005 * 0.2), // 20% für Geocoding
+        distanceMatrix: Math.floor(dailyBudgetEUR / 0.01 * 0.8) // 80% für Distance Matrix
+    };
+
+    res.json({
+        success: true,
+        message: `Tagesbudget auf ${dailyBudgetEUR}€ gesetzt`,
+        newLimits: {
+            geocoding: `${apiController.dailyLimits.geocoding} Anfragen`,
+            distanceMatrix: `${apiController.dailyLimits.distanceMatrix} Anfragen`,
+            estimatedOptimizations: Math.floor(apiController.dailyLimits.distanceMatrix / 100)
+        }
+    });
+});
+
+// API Usage Reset (für Tests)
+app.post('/api/admin/reset-usage', validateSession, (req, res) => {
+    apiController.todayUsage = {
+        geocoding: 0,
+        distanceMatrix: 0,
+        totalCostEUR: 0,
+        date: new Date().toISOString().split('T')[0]
+    };
+
+    res.json({
+        success: true,
+        message: 'API Usage zurückgesetzt',
+        status: apiController.getStatus()
+    });
+});
 
 // ======================================================================
 // ERROR HANDLING & 404
