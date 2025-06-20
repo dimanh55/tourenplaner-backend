@@ -489,6 +489,9 @@ class IntelligentRoutePlanner {
     }
 
     getCityName(address) {
+        if (!address || typeof address !== 'string') {
+            return 'Unbekannt';
+        }
         const match = address.match(/\d{5}\s+([^,]+)/);
         return match ? match[1].trim() : address.substring(0, 20) + '...';
     }
