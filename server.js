@@ -10,7 +10,8 @@ require('dotenv').config();
 // ======================================================================
 // INTELLIGENTE ROUTENPLANUNG KLASSE (Aus separater Datei importiert)
 // ======================================================================
-const IntelligentRoutePlanner = require('./intelligent-route-planner');
+// Verwende die korrigierte Version des Routenplaners
+const IntelligentRoutePlanner = require('./intelligent-route-planner-fixed');
 const UltraOptimizedMapsService = require('./optimized-maps-service');
 const { APIBudgetController, SmartDistanceCalculator } = require('./api-budget-controller');
 
@@ -445,55 +446,57 @@ app.get('/api/drivers', (req, res) => {
 // MAXIMALE EFFIZIENZ ROUTENOPTIMIERUNG
 // ======================================================================
 
+// KORRIGIERTE VERSION: Route optimieren mit verbesserter Duplikatsprüfung
 app.post('/api/routes/optimize', validateSession, async (req, res) => {
     const { weekStart, driverId, autoSave = true, forceNew = false } = req.body;
-    
+
     if (!weekStart) {
         return res.status(400).json({ error: 'weekStart is required' });
     }
 
-    console.log('🚀 MAXIMALE EFFIZIENZ Routenoptimierung für Woche:', weekStart);
-    
-    try {
-        // 1. Prüfe ob für diese spezifische Woche bereits eine Route existiert
-        const existingRoute = await new Promise((resolve, reject) => {
-            db.get(
-                "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
-                [weekStart],
-                (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                }
-            );
-        });
+    console.log('🚀 KORRIGIERTE Routenoptimierung für Woche:', weekStart);
 
-        // Wenn Route existiert und nicht neu berechnet werden soll, lade sie
-        if (existingRoute && !forceNew) {
-            console.log('📋 Lade existierende Route für Woche', weekStart);
-            const routeData = JSON.parse(existingRoute.route_data);
-            return res.json({
-                success: true,
-                route: routeData,
-                message: `Existierende Route für Woche ${weekStart} geladen`,
-                autoSaved: false,
-                isExisting: true
+    try {
+        if (!forceNew) {
+            const existingRoute = await new Promise((resolve, reject) => {
+                db.get(
+                    "SELECT * FROM saved_routes WHERE week_start = ? AND is_active = 1",
+                    [weekStart],
+                    (err, row) => {
+                        if (err) reject(err);
+                        else resolve(row);
+                    }
+                );
             });
+
+            if (existingRoute) {
+                console.log('📋 Lade existierende Route für Woche', weekStart);
+                const routeData = JSON.parse(existingRoute.route_data);
+                return res.json({
+                    success: true,
+                    route: routeData,
+                    message: `Existierende Route für Woche ${weekStart} geladen`,
+                    autoSaved: false,
+                    isExisting: true
+                });
+            }
         }
 
-        // 2. Lade ALLE verfügbaren Termine (außer "on hold")
         const allAppointments = await new Promise((resolve, reject) => {
-            db.all(`
-                SELECT * FROM appointments 
+            db.all(
+                `SELECT * FROM appointments 
                 WHERE (on_hold IS NULL OR on_hold = '' OR TRIM(on_hold) = '')
                 ORDER BY 
                     is_fixed DESC,
+                    fixed_date ASC,
                     CASE WHEN status = 'bestätigt' THEN 0 ELSE 1 END,
                     pipeline_days DESC,
-                    priority DESC
-            `, (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
+                    priority DESC`,
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                }
+            );
         });
 
         if (allAppointments.length === 0) {
@@ -504,14 +507,11 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
             });
         }
 
-        console.log(`📊 ${allAppointments.length} planbare Termine verfügbar`);
-
-        // 3. Intelligente Auswahl: Maximiere Termine pro Woche
         const selectedAppointments = await selectMaxAppointmentsForWeek(
             allAppointments,
             weekStart
         );
-        
+
         if (selectedAppointments.length === 0) {
             return res.json({
                 success: false,
@@ -519,35 +519,39 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
                 route: createEmptyWeekStructure(weekStart)
             });
         }
-        
-        // 4. Führe echte intelligente Routenoptimierung durch
-        let optimizedRoute;
-        try {
-            const planner = new IntelligentRoutePlanner(db);
-            optimizedRoute = await planner.optimizeWeek(selectedAppointments, weekStart, driverId);
-        } catch (plannerError) {
-            console.error('❌ Intelligente Planung fehlgeschlagen:', plannerError.message);
-            return res.status(500).json({
-                success: false,
-                error: 'Routenoptimierung fehlgeschlagen',
-                details: plannerError.message,
-                route: createEmptyWeekStructure(weekStart)
-            });
-        }
 
-        // 5. Route speichern
+        const IntelligentRoutePlanner = require('./intelligent-route-planner-fixed.js');
+        const planner = new IntelligentRoutePlanner(db);
+        const optimizedRoute = await planner.optimizeWeek(selectedAppointments, weekStart, driverId || 1);
+
         if (autoSave && optimizedRoute.stats.totalAppointments > 0) {
+            await new Promise((resolve, reject) => {
+                db.run(
+                    "UPDATE saved_routes SET is_active = 0 WHERE week_start = ?",
+                    [weekStart],
+                    (err) => err ? reject(err) : resolve()
+                );
+            });
+
             const routeName = `Woche ${weekStart}: KW ${getWeekNumber(weekStart)} (${optimizedRoute.stats.totalAppointments} Termine)`;
-            await saveRouteToDatabase(routeName, weekStart, driverId, optimizedRoute);
+            await saveRouteToDatabase(routeName, weekStart, driverId || 1, optimizedRoute);
             console.log(`💾 Route für ${weekStart} gespeichert`);
         }
 
         res.json({
             success: true,
             route: optimizedRoute,
-            message: `Maximale Effizienz erreicht: ${optimizedRoute.stats.totalAppointments} Termine für Woche ${weekStart} geplant`,
+            message: `Route optimiert: ${optimizedRoute.stats.totalAppointments} Termine für Woche ${weekStart}`,
             autoSaved: autoSave && optimizedRoute.stats.totalAppointments > 0,
-            isNew: true
+            isNew: true,
+            stats: {
+                totalAvailable: allAppointments.length,
+                selectedForWeek: selectedAppointments.length,
+                fixedInWeek: selectedAppointments.filter(a => a.is_fixed).length,
+                flexibleInWeek: selectedAppointments.filter(a => !a.is_fixed).length,
+                alreadyPlannedElsewhere: allAppointments.filter(a => !a.is_fixed).length -
+                                        selectedAppointments.filter(a => !a.is_fixed).length
+            }
         });
 
     } catch (error) {
@@ -892,129 +896,94 @@ app.post('/api/routes/optimize-efficient', validateSession, async (req, res) => 
 // KORRIGIERTE VERSION: Verhindert doppelte Planung von Terminen
 async function getUsedAppointmentIds(excludeWeekStart) {
     return new Promise((resolve, reject) => {
-        // Hole ALLE gespeicherten Routen, optional ohne eine bestimmte Woche
-        let query = "SELECT route_data, week_start FROM saved_routes";
-        const params = [];
-        if (excludeWeekStart) {
-            query += " WHERE week_start != ?";
-            params.push(excludeWeekStart);
-        }
-
-        db.all(query, params, (err, rows) => {
+        db.all("SELECT id, week_start, route_data FROM saved_routes WHERE is_active = 1", (err, rows) => {
             if (err) {
                 reject(err);
                 return;
             }
-                
-                const usedIds = new Set();
-                const usedByWeek = {};
-                
-                rows.forEach(row => {
-                    try {
-                        const routeData = JSON.parse(row.route_data);
-                        const weekStart = row.week_start;
-                        
-                        routeData.days?.forEach(day => {
-                            day.appointments?.forEach(apt => {
-                                if (apt.id) {
-                                    usedIds.add(apt.id);
-                                    // Tracke in welcher Woche der Termin verwendet wird
-                                    if (!usedByWeek[apt.id]) {
-                                        usedByWeek[apt.id] = [];
-                                    }
-                                    usedByWeek[apt.id].push(weekStart);
-                                }
-                            });
+
+            const usedIds = new Set();
+            const usageMap = new Map();
+
+            rows.forEach(row => {
+                if (excludeWeekStart && row.week_start === excludeWeekStart) {
+                    return;
+                }
+                try {
+                    const routeData = JSON.parse(row.route_data);
+                    routeData.days?.forEach(day => {
+                        day.appointments?.forEach(apt => {
+                            if (apt.id) {
+                                usedIds.add(apt.id);
+                                if (!usageMap.has(apt.id)) usageMap.set(apt.id, []);
+                                usageMap.get(apt.id).push(row.week_start);
+                            }
                         });
-                    } catch (e) {
-                        console.warn('Fehler beim Parsen der Route-Daten:', e);
-                    }
-                });
-                
-                console.log(`📊 ${usedIds.size} Termine sind bereits in anderen Wochen geplant`);
-                
-                // Debug: Zeige welche Termine wo verwendet werden
-                Object.entries(usedByWeek).forEach(([aptId, weeks]) => {
-                    if (weeks.length > 1) {
-                        console.warn(`⚠️ Termin ${aptId} ist in mehreren Wochen geplant: ${weeks.join(', ')}`);
-                    }
-                });
-                
-                resolve(Array.from(usedIds));
-            }
-        );
+                    });
+                } catch (e) {
+                    console.warn(`Fehler beim Parsen der Route ${row.id}:`, e);
+                }
+            });
+
+            usageMap.forEach((weeks, aptId) => {
+                if (weeks.length > 1) {
+                    console.error(`⚠️ DUPLIKAT: Termin ${aptId} ist in ${weeks.length} Wochen geplant: ${weeks.join(', ')}`);
+                }
+            });
+
+            console.log(`📊 ${usedIds.size} Termine sind bereits geplant (ohne Woche ${excludeWeekStart || 'keine'})`);
+            resolve(Array.from(usedIds));
+        });
     });
 }
 
 // KORRIGIERTE VERSION: Wählt nur ungenutzte Termine aus
 async function selectMaxAppointmentsForWeek(allAppointments, weekStart) {
     console.log(`🎯 Optimiere Terminauswahl für Woche ${weekStart}`);
-    
-    // Trenne fixe und flexible Termine
+
     const weekStartDate = new Date(weekStart);
     const weekEndDate = new Date(weekStartDate);
-    weekEndDate.setDate(weekStartDate.getDate() + 4); // Freitag
+    weekEndDate.setDate(weekStartDate.getDate() + 4);
 
-    // Fixe Termine für diese spezifische Woche
     const fixedAppointmentsThisWeek = allAppointments.filter(apt => {
         if (!apt.is_fixed || !apt.fixed_date) return false;
         const aptDate = new Date(apt.fixed_date);
         return aptDate >= weekStartDate && aptDate <= weekEndDate;
     });
 
-    console.log(`📌 ${fixedAppointmentsThisWeek.length} fixe Termine für diese Woche`);
+    console.log(`📌 ${fixedAppointmentsThisWeek.length} fixe Termine für Woche ${weekStart}`);
 
-    // Hole bereits verwendete Termin-IDs
     const usedAppointmentIds = await getUsedAppointmentIds(weekStart);
-    console.log(`🚫 ${usedAppointmentIds.length} Termine sind bereits in anderen Wochen geplant`);
 
-    // Flexible Termine, die noch nicht verwendet wurden
     const availableFlexibleAppointments = allAppointments.filter(apt => {
-        // Nur flexible Termine
-        if (apt.is_fixed || apt.fixed_date) return false;
-        
-        // Nicht bereits in einer anderen Woche geplant
-        if (usedAppointmentIds.includes(apt.id)) {
-            console.log(`⏭️ Überspringe bereits geplanten Termin: ${apt.customer} (ID: ${apt.id})`);
-            return false;
-        }
-        
+        if (apt.is_fixed) return false;
+        if (usedAppointmentIds.includes(apt.id)) return false;
+        if (apt.status === 'abgesagt') return false;
         return true;
     });
 
-    console.log(`📋 ${availableFlexibleAppointments.length} flexible Termine verfügbar`);
+    console.log(`📋 ${availableFlexibleAppointments.length} flexible Termine verfügbar (von ${allAppointments.filter(a => !a.is_fixed).length} gesamt)`);
+    console.log(`🚫 ${usedAppointmentIds.length} Termine sind bereits in anderen Wochen geplant`);
 
-    // Sortiere flexible Termine nach Priorität
     const sortedFlexible = availableFlexibleAppointments.sort((a, b) => {
-        // Bestätigte Termine zuerst
         if (a.status === 'bestätigt' && b.status !== 'bestätigt') return -1;
         if (b.status === 'bestätigt' && a.status !== 'bestätigt') return 1;
-        
-        // Dann nach Pipeline-Alter (ältere zuerst)
         if (b.pipeline_days !== a.pipeline_days) {
             return b.pipeline_days - a.pipeline_days;
         }
-        
-        // Dann nach Priorität
         const priorityMap = { 'hoch': 3, 'mittel': 2, 'niedrig': 1 };
         return (priorityMap[b.priority] || 0) - (priorityMap[a.priority] || 0);
     });
 
-    // Kombiniere fixe und flexible Termine
     const selectedAppointments = [
         ...fixedAppointmentsThisWeek,
         ...sortedFlexible
     ];
 
-    console.log(`✅ ${selectedAppointments.length} Termine für Woche ${weekStart} ausgewählt`);
+    console.log(`✅ ${selectedAppointments.length} Termine für Woche ${weekStart} verfügbar`);
     console.log(`   - ${fixedAppointmentsThisWeek.length} fixe Termine`);
     console.log(`   - ${sortedFlexible.length} flexible Termine`);
-    
-    // Debug: Zeige die ersten ausgewählten Termine
-    selectedAppointments.slice(0, 5).forEach((apt, i) => {
-        console.log(`   ${i + 1}. ${apt.customer} (${apt.status}, ${apt.pipeline_days} Tage, ${apt.is_fixed ? 'FIX' : 'flexibel'})`);
-    });
-    
+
     return selectedAppointments;
 }
 
@@ -3745,6 +3714,371 @@ console.log('  DELETE /api/appointments/fixed/:id - Fixen Termin löschen');
 console.log('  POST /api/appointments/suggest-alternatives - Alternative Terminvorschläge');
 
 // ======================================================================
+// INTELLIGENTE ALTERNATIVE SLOT SUCHE
+// ======================================================================
+
+// Hauptfunktion: Finde alternative Slots für abgelehnte Termine
+app.post('/api/appointments/find-alternatives', validateSession, async (req, res) => {
+    const { appointmentId, currentWeek, nextWeeks = 2, reason = 'customer_rejected' } = req.body;
+
+    if (!appointmentId) {
+        return res.status(400).json({ error: 'appointmentId ist erforderlich' });
+    }
+
+    try {
+        console.log(`🔄 Suche alternative Slots für Termin ${appointmentId}...`);
+        const appointment = await new Promise((resolve, reject) => {
+            db.get(
+                "SELECT * FROM appointments WHERE id = ?",
+                [appointmentId],
+                (err, row) => err ? reject(err) : resolve(row)
+            );
+        });
+
+        if (!appointment) {
+            return res.status(404).json({ error: 'Termin nicht gefunden' });
+        }
+
+        if (!appointment.lat || !appointment.lng) {
+            const geocodingService = new EnhancedGeocodingService(db);
+            try {
+                const coords = await geocodingService.geocodeAddress(appointment.address);
+                appointment.lat = coords.lat;
+                appointment.lng = coords.lng;
+            } catch (e) {
+                console.warn('⚠️ Geocoding fehlgeschlagen, nutze Fallback');
+            }
+        }
+
+        const alternatives = await findAlternativeSlotsIntelligent(
+            appointment,
+            currentWeek || new Date().toISOString().split('T')[0],
+            nextWeeks
+        );
+
+        if (reason === 'customer_rejected') {
+            await new Promise((resolve, reject) => {
+                db.run(
+                    `UPDATE appointments 
+                     SET status = 'umzuplanen',
+                         notes = json_set(COALESCE(notes, '{}'), '$.rejection_info', json(?))
+                     WHERE id = ?`,
+                    [JSON.stringify({
+                        reason: reason,
+                        rejected_at: new Date().toISOString(),
+                        alternatives_found: alternatives.length,
+                        original_week: currentWeek
+                    }), appointmentId],
+                    err => err ? reject(err) : resolve()
+                );
+            });
+        }
+
+        res.json({
+            success: true,
+            appointment: {
+                id: appointment.id,
+                customer: appointment.customer,
+                address: appointment.address
+            },
+            alternatives: alternatives,
+            totalFound: alternatives.length,
+            recommendation: generateRecommendation(alternatives, appointment),
+            nextSteps: alternatives.length > 0 ? [
+                'Kunde über alternative Termine informieren',
+                'Nach Bestätigung Route neu berechnen',
+                'Termin als "bestätigt" markieren'
+            ] : [
+                'Keine passenden Slots in den nächsten Wochen',
+                'Termin für spätere Planung vormerken',
+                'Kunde über Verzögerung informieren'
+            ]
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler bei Alternativsuche:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// API Endpoint: Termin verschieben
+app.post('/api/appointments/reschedule', validateSession, async (req, res) => {
+    const { appointmentId, newWeek, newDay, newTime } = req.body;
+
+    if (!appointmentId || !newWeek || !newDay || !newTime) {
+        return res.status(400).json({
+            error: 'appointmentId, newWeek, newDay und newTime sind erforderlich'
+        });
+    }
+
+    try {
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE appointments 
+                 SET status = 'bestätigt',
+                     notes = json_set(COALESCE(notes, '{}'), '$.rescheduled', json(?))
+                 WHERE id = ?`,
+                [JSON.stringify({
+                    to_week: newWeek,
+                    to_day: newDay,
+                    to_time: newTime,
+                    rescheduled_at: new Date().toISOString()
+                }), appointmentId],
+                err => err ? reject(err) : resolve()
+            );
+        });
+
+        const recalcResult = await fetch(`${req.protocol}://${req.get('host')}/api/routes/recalculate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': req.headers.authorization
+            },
+            body: JSON.stringify({
+                weekStart: newWeek,
+                preserveFixed: true,
+                triggerAppointmentId: appointmentId
+            })
+        }).then(r => r.json());
+
+        res.json({
+            success: true,
+            message: 'Termin erfolgreich verschoben',
+            appointment: {
+                id: appointmentId,
+                newSchedule: {
+                    week: newWeek,
+                    day: newDay,
+                    time: newTime
+                }
+            },
+            routeRecalculated: recalcResult.success
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Verschieben:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Intelligente Suche nach alternativen Slots
+async function findAlternativeSlotsIntelligent(appointment, startWeek, weeksToCheck = 2) {
+    const alternatives = [];
+    const weekStart = new Date(startWeek);
+    for (let w = 0; w < weeksToCheck; w++) {
+        const checkWeek = new Date(weekStart);
+        checkWeek.setDate(weekStart.getDate() + (w * 7));
+        const weekStr = checkWeek.toISOString().split('T')[0];
+        console.log(`📅 Prüfe Woche ${w + 1}: ${weekStr}`);
+        const weekRoute = await new Promise((resolve, reject) => {
+            db.get(
+                "SELECT route_data FROM saved_routes WHERE week_start = ? AND is_active = 1",
+                [weekStr],
+                (err, row) => {
+                    if (err || !row) resolve(null);
+                    else {
+                        try { resolve(JSON.parse(row.route_data)); } catch (e) { resolve(null); }
+                    }
+                }
+            );
+        });
+        if (!weekRoute) {
+            for (let d = 0; d < 5; d++) {
+                const dayDate = new Date(checkWeek);
+                dayDate.setDate(checkWeek.getDate() + d);
+                alternatives.push({
+                    week: weekStr,
+                    day: ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag'][d],
+                    date: dayDate.toISOString().split('T')[0],
+                    slot: { startTime: '09:00', endTime: '12:00', duration: 3 },
+                    travelEfficiency: 0.5,
+                    reason: 'Kompletter Tag verfügbar',
+                    quality: 0.7,
+                    type: 'empty_day'
+                });
+            }
+        } else {
+            for (let dayIndex = 0; dayIndex < weekRoute.days.length; dayIndex++) {
+                const day = weekRoute.days[dayIndex];
+                const dayAlternatives = await analyzeDayForAlternatives(day, appointment, dayIndex, weekStr);
+                alternatives.push(...dayAlternatives);
+            }
+        }
+    }
+    alternatives.sort((a, b) => {
+        const weekDiff = (new Date(a.week) - new Date(b.week)) / (7*24*60*60*1000);
+        const efficiencyDiff = b.travelEfficiency - a.travelEfficiency;
+        const qualityDiff = b.quality - a.quality;
+        return efficiencyDiff * 2 + weekDiff * 0.5 + qualityDiff;
+    });
+    return alternatives.slice(0, 10);
+}
+
+async function analyzeDayForAlternatives(day, appointment, dayIndex, weekStr) {
+    const alternatives = [];
+    const constraints = {
+        workStartTime: 9,
+        workEndTime: 18,
+        appointmentDuration: 3,
+        minSlotDuration: 3.5,
+        travelPadding: 0.25
+    };
+    const freeSlots = findFreeSlotsInDay(day, constraints);
+    for (const slot of freeSlots) {
+        if (slot.duration < constraints.minSlotDuration) continue;
+        const efficiency = await calculateSlotEfficiency(day, slot, appointment, constraints);
+        const quality = evaluateSlotQuality(slot, dayIndex);
+        alternatives.push({
+            week: weekStr,
+            day: day.day,
+            date: day.date,
+            slot: {
+                startTime: slot.startTime,
+                endTime: addHoursToTime(slot.startTime, 3),
+                duration: 3,
+                availableBuffer: slot.duration - 3
+            },
+            travelEfficiency: efficiency.score,
+            travelDetails: efficiency.details,
+            quality: quality,
+            reason: efficiency.reason,
+            type: 'available_slot',
+            nearbyAppointments: efficiency.nearbyAppointments
+        });
+    }
+    return alternatives;
+}
+
+function findFreeSlotsInDay(day, constraints) {
+    const slots = [];
+    const dayStart = constraints.workStartTime;
+    const dayEnd = constraints.workEndTime;
+    const sortedAppointments = [...(day.appointments || [])].sort((a,b)=> timeToHours(a.startTime)-timeToHours(b.startTime));
+    if (sortedAppointments.length === 0) {
+        slots.push({ startTime: hoursToTime(dayStart), endTime: hoursToTime(dayEnd), duration: dayEnd - dayStart });
+        return slots;
+    }
+    const firstStart = timeToHours(sortedAppointments[0].startTime);
+    const firstTravelTime = day.travelSegments?.find(s => s.type === 'departure')?.duration || 1;
+    const earliestPossibleStart = dayStart + firstTravelTime;
+    if (firstStart > earliestPossibleStart + 0.5) {
+        slots.push({
+            startTime: hoursToTime(earliestPossibleStart),
+            endTime: hoursToTime(firstStart - 0.5),
+            duration: firstStart - earliestPossibleStart - 0.5
+        });
+    }
+    for (let i=0;i<sortedAppointments.length-1;i++){
+        const currentEnd = timeToHours(sortedAppointments[i].endTime);
+        const nextStart = timeToHours(sortedAppointments[i+1].startTime);
+        const travelTime = 0.5;
+        if (nextStart - currentEnd > travelTime + 0.5) {
+            slots.push({
+                startTime: hoursToTime(currentEnd + travelTime),
+                endTime: hoursToTime(nextStart - constraints.travelPadding),
+                duration: nextStart - currentEnd - travelTime - constraints.travelPadding
+            });
+        }
+    }
+    const lastEnd = timeToHours(sortedAppointments[sortedAppointments.length-1].endTime);
+    const returnTravelTime = day.travelSegments?.find(s => s.type === 'return')?.duration || 1;
+    const latestPossibleEnd = dayEnd - returnTravelTime;
+    if (latestPossibleEnd > lastEnd + 0.5) {
+        slots.push({
+            startTime: hoursToTime(lastEnd + 0.5),
+            endTime: hoursToTime(latestPossibleEnd),
+            duration: latestPossibleEnd - lastEnd - 0.5
+        });
+    }
+    return slots;
+}
+
+async function calculateSlotEfficiency(day, slot, appointment, constraints) {
+    let score = 0.5;
+    const details = [];
+    const nearbyAppointments = [];
+    for (const existingApt of day.appointments || []) {
+        if (!existingApt.lat || !existingApt.lng || !appointment.lat || !appointment.lng) continue;
+        const distance = calculateHaversineDistance(appointment.lat, appointment.lng, existingApt.lat, existingApt.lng);
+        const timeDiff = Math.abs(timeToHours(slot.startTime) - timeToHours(existingApt.startTime));
+        if (distance < 30 && timeDiff < 4) {
+            score += 0.3;
+            nearbyAppointments.push({ customer: existingApt.customer, distance: Math.round(distance), timeDiff: Math.round(timeDiff*60) });
+            details.push(`${Math.round(distance)}km von ${existingApt.customer}`);
+        } else if (distance < 50 && timeDiff < 6) {
+            score += 0.2;
+            nearbyAppointments.push({ customer: existingApt.customer, distance: Math.round(distance), timeDiff: Math.round(timeDiff*60) });
+        } else if (distance < 100) {
+            score += 0.1;
+        }
+    }
+    if (nearbyAppointments.length === 0 && day.appointments.length > 0) {
+        score -= 0.2;
+        details.push('Isoliert von anderen Terminen');
+    }
+    const dayUtilization = (day.appointments.length * 3 + 3) / 9;
+    if (dayUtilization > 0.6 && dayUtilization < 0.9) {
+        score += 0.1;
+        details.push('Gute Tagesauslastung');
+    }
+    const reason = nearbyAppointments.length > 0 ? `Nahe ${nearbyAppointments.length} anderen Terminen` : 'Freier Slot verfügbar';
+    return { score: Math.max(0, Math.min(1, score)), details, nearbyAppointments, reason };
+}
+
+function evaluateSlotQuality(slot, dayIndex) {
+    let quality = 0.5;
+    const slotStart = timeToHours(slot.startTime);
+    if (slotStart >= 9 && slotStart <= 11) quality += 0.3;
+    else if (slotStart >= 13 && slotStart <= 15) quality += 0.2;
+    else if (slotStart >= 15 && slotStart <= 17) quality += 0.1;
+    if (dayIndex >= 1 && dayIndex <= 3) quality += 0.1;
+    if (slot.duration > 5) quality += 0.2;
+    else if (slot.duration > 4) quality += 0.1;
+    return Math.max(0, Math.min(1, quality));
+}
+
+function generateRecommendation(alternatives, appointment) {
+    if (alternatives.length === 0) {
+        return {
+            summary: 'Keine passenden Alternativen gefunden',
+            action: 'Termin für spätere Planung vormerken',
+            details: 'In den geprüften Wochen sind keine effizienten Slots verfügbar'
+        };
+    }
+    const best = alternatives[0];
+    const recommendation = {
+        summary: `Beste Alternative: ${best.day}, ${best.date} um ${best.slot.startTime}`,
+        action: 'Kunde kontaktieren und Alternative anbieten',
+        details: []
+    };
+    if (best.travelEfficiency > 0.7) recommendation.details.push('✅ Ausgezeichnete Reiseeffizienz');
+    else if (best.travelEfficiency > 0.5) recommendation.details.push('✅ Gute Reiseeffizienz');
+    if (best.nearbyAppointments?.length > 0) {
+        recommendation.details.push(`📍 ${best.nearbyAppointments.length} Termine in der Nähe`);
+    }
+    if (best.quality > 0.7) recommendation.details.push('⏰ Optimaler Zeitslot');
+    if (alternatives.filter(a => a.travelEfficiency > 0.6).length >= 3) {
+        recommendation.details.push(`${alternatives.filter(a => a.travelEfficiency > 0.6).length} weitere gute Alternativen verfügbar`);
+    }
+    return recommendation;
+}
+
+function timeToHours(timeStr) { const [h,m] = timeStr.split(':').map(Number); return h + (m||0)/60; }
+function hoursToTime(hours) { const h = Math.floor(hours); const m = Math.round((hours - h)*60); return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`; }
+function addHoursToTime(timeStr, hours) { return hoursToTime(timeToHours(timeStr) + hours); }
+function calculateHaversineDistance(lat1,lng1,lat2,lng2){ const R=6371; const dLat=(lat2-lat1)*Math.PI/180; const dLng=(lng2-lng1)*Math.PI/180; const a=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2); const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)); return R*c; }
+
+console.log('🔄 Alternative Slot Funktionen hinzugefügt:');
+console.log('  POST /api/appointments/find-alternatives - Finde alternative Termine');
+console.log('  POST /api/appointments/reschedule - Verschiebe Termin');
+
+// ======================================================================
 // SERVER INTEGRATION FÜR ENHANCED GEOCODING SERVICE
 // ======================================================================
 
@@ -4281,6 +4615,133 @@ app.post('/api/admin/reset-usage', validateSession, (req, res) => {
         status: apiController.getStatus()
     });
 });
+
+// ZUSÄTZLICH: Bereinige doppelte Planungen (Admin-Funktion)
+app.post('/api/admin/fix-duplicate-planning', validateSession, async (req, res) => {
+    try {
+        console.log('🧹 Bereinige doppelte Terminplanungen...');
+        const allRoutes = await new Promise((resolve, reject) => {
+            db.all("SELECT id, week_start, route_data FROM saved_routes WHERE is_active = 1",
+                (err, rows) => err ? reject(err) : resolve(rows)
+            );
+        });
+        const appointmentUsage = new Map();
+        const duplicates = [];
+        allRoutes.forEach(route => {
+            try {
+                const routeData = JSON.parse(route.route_data);
+                routeData.days?.forEach(day => {
+                    day.appointments?.forEach(apt => {
+                        if (apt.id) {
+                            if (!appointmentUsage.has(apt.id)) {
+                                appointmentUsage.set(apt.id, []);
+                            }
+                            appointmentUsage.get(apt.id).push({
+                                routeId: route.id,
+                                weekStart: route.week_start,
+                                customer: apt.customer
+                            });
+                        }
+                    });
+                });
+            } catch (e) {
+                console.error(`Fehler beim Parsen von Route ${route.id}:`, e);
+            }
+        });
+        appointmentUsage.forEach((usage, aptId) => {
+            if (usage.length > 1) {
+                duplicates.push({
+                    appointmentId: aptId,
+                    customer: usage[0].customer,
+                    plannedIn: usage.map(u => u.weekStart),
+                    routes: usage
+                });
+            }
+        });
+        console.log(`🔍 ${duplicates.length} doppelt geplante Termine gefunden`);
+        if (req.body.fix === true && duplicates.length > 0) {
+            for (const dup of duplicates) {
+                const keepWeek = dup.routes[0].weekStart;
+                for (let i = 1; i < dup.routes.length; i++) {
+                    const removeFrom = dup.routes[i];
+                    console.log(`🗑️ Entferne ${dup.customer} aus Woche ${removeFrom.weekStart}`);
+                    const routeData = await new Promise((resolve, reject) => {
+                        db.get("SELECT route_data FROM saved_routes WHERE id = ?",
+                            [removeFrom.routeId],
+                            (err, row) => err ? reject(err) : resolve(JSON.parse(row.route_data))
+                        );
+                    });
+                    routeData.days.forEach(day => {
+                        day.appointments = day.appointments.filter(apt => apt.id !== dup.appointmentId);
+                    });
+                    routeData.stats.totalAppointments = routeData.days.reduce(
+                        (sum, day) => sum + day.appointments.length, 0
+                    );
+                    await new Promise((resolve, reject) => {
+                        db.run(
+                            "UPDATE saved_routes SET route_data = ? WHERE id = ?",
+                            [JSON.stringify(routeData), removeFrom.routeId],
+                            err => err ? reject(err) : resolve()
+                        );
+                    });
+                }
+            }
+            res.json({
+                success: true,
+                message: `${duplicates.length} Duplikate bereinigt`,
+                duplicates: duplicates,
+                action: 'fixed'
+            });
+        } else {
+            res.json({
+                success: true,
+                duplicatesFound: duplicates.length,
+                duplicates: duplicates.slice(0, 10),
+                message: duplicates.length > 0 ?
+                    `${duplicates.length} Duplikate gefunden. Setze fix=true zum Bereinigen` :
+                    'Keine Duplikate gefunden'
+            });
+        }
+    } catch (error) {
+        console.error('❌ Duplikat-Bereinigung fehlgeschlagen:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// HELPER: Lade alle Termine einer Woche (für Alternative Slots)
+async function getWeekAppointments(weekStart) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            "SELECT route_data FROM saved_routes WHERE week_start = ? AND is_active = 1",
+            [weekStart],
+            (err, row) => {
+                if (err || !row) {
+                    resolve([]);
+                } else {
+                    try {
+                        const routeData = JSON.parse(row.route_data);
+                        const allAppointments = [];
+                        routeData.days.forEach(day => {
+                            day.appointments.forEach(apt => {
+                                allAppointments.push({
+                                    ...apt,
+                                    day: day.day,
+                                    date: day.date
+                                });
+                            });
+                        });
+                        resolve(allAppointments);
+                    } catch (e) {
+                        resolve([]);
+                    }
+                }
+            }
+        );
+    });
+}
 
 // ======================================================================
 // ERROR HANDLING & 404
