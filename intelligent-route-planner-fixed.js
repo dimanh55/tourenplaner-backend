@@ -7,10 +7,10 @@ class IntelligentRoutePlanner {
         this.distanceCache = new Map();
         this.apiCallsCount = 0;
         this.constraints = {
-            maxWorkHoursPerWeek: 42.5,
-            maxWorkHoursPerDay: 9,
-            workStartTime: 9,
-            workEndTime: 18,
+            maxWorkHoursPerWeek: 40,
+            maxWorkHoursPerDay: 8,
+            workStartTime: 8.5,
+            workEndTime: 17,
             appointmentDuration: 3,
             homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
             travelTimePadding: 0.25,
@@ -87,20 +87,38 @@ class IntelligentRoutePlanner {
             });
         }
         let currentLocation = startLocation;
+        const remaining = [];
         for (let i = 0; i < sortedAppts.length; i++) {
             const apt = sortedAppts[i];
-            apt.startTime = this.formatTime(currentTime);
-            apt.endTime = this.formatTime(currentTime + this.constraints.appointmentDuration);
-            day.appointments.push(apt);
-            currentTime += this.constraints.appointmentDuration;
-            currentLocation = apt;
-            if (i < sortedAppts.length - 1) {
-                const nextApt = sortedAppts[i + 1];
-                const travelDist = await this.getDistance(apt, nextApt);
+            const travelDist = await this.getDistance(currentLocation, apt);
+
+            if (currentTime + travelDist.duration + this.constraints.appointmentDuration > this.constraints.workEndTime) {
+                if (currentTime + travelDist.duration <= this.constraints.workEndTime) {
+                    day.travelSegments.push({
+                        type: 'travel',
+                        from: currentLocation.name ? currentLocation.name : this.getCityName(currentLocation.address),
+                        to: this.getCityName(apt.address),
+                        distance: Math.round(travelDist.distance),
+                        duration: travelDist.duration,
+                        startTime: this.formatTime(currentTime),
+                        endTime: this.formatTime(currentTime + travelDist.duration)
+                    });
+                    currentTime += travelDist.duration;
+                    day.overnight = {
+                        city: this.getCityName(apt.address),
+                        location: { lat: apt.lat, lng: apt.lng },
+                        reason: 'Arbeitszeitende erreicht'
+                    };
+                }
+                remaining.push(...sortedAppts.slice(i));
+                break;
+            }
+
+            if (travelDist.duration > 0) {
                 day.travelSegments.push({
                     type: 'travel',
-                    from: this.getCityName(apt.address),
-                    to: this.getCityName(nextApt.address),
+                    from: currentLocation.name ? currentLocation.name : this.getCityName(currentLocation.address),
+                    to: this.getCityName(apt.address),
                     distance: Math.round(travelDist.distance),
                     duration: travelDist.duration,
                     startTime: this.formatTime(currentTime),
@@ -108,11 +126,18 @@ class IntelligentRoutePlanner {
                 });
                 currentTime += travelDist.duration;
             }
+
+            apt.startTime = this.formatTime(currentTime);
+            apt.endTime = this.formatTime(currentTime + this.constraints.appointmentDuration);
+            day.appointments.push(apt);
+            currentTime += this.constraints.appointmentDuration;
+            currentLocation = apt;
         }
-        const lastApt = sortedAppts[sortedAppts.length - 1];
+        const lastApt = day.appointments.length > 0 ? day.appointments[day.appointments.length - 1] : startLocation;
         const homeDist = await this.getDistance(lastApt, this.constraints.homeBase);
         const arrivalTimeHome = currentTime + homeDist.duration;
-        if (homeDist.distance > this.constraints.overnightThreshold || arrivalTimeHome > 21) {
+        const endLimit = day.day === 'Freitag' ? this.constraints.workEndTime : this.constraints.workEndTime;
+        if (day.overnight || homeDist.distance > this.constraints.overnightThreshold || arrivalTimeHome > endLimit) {
             const overnightCity = this.getCityName(lastApt.address);
             day.overnight = {
                 city: overnightCity,
@@ -134,10 +159,12 @@ class IntelligentRoutePlanner {
                 startTime: this.formatTime(currentTime),
                 endTime: this.formatTime(currentTime + homeDist.duration)
             });
+            currentTime += homeDist.duration;
         }
-        day.workTime = sortedAppts.length * this.constraints.appointmentDuration;
+        day.workTime = day.appointments.length * this.constraints.appointmentDuration;
         day.travelTime = day.travelSegments.reduce((sum, seg) => sum + seg.duration, 0);
         day.totalHours = day.workTime + day.travelTime;
+        return remaining;
     }
 
     // ======================================================================
@@ -150,20 +177,25 @@ class IntelligentRoutePlanner {
         const sortedRegions = this.sortRegionsByDistance(regions);
         let dayIndex = 0;
         let previousDayOvernight = null;
+        let weekHours = 0;
         for (const regionName of sortedRegions) {
             const regionAppts = regions[regionName].appointments;
             if (regionAppts.length === 0) continue;
             const appointmentsPerDay = Math.ceil(regionAppts.length / (5 - dayIndex));
             for (let i = 0; i < regionAppts.length && dayIndex < 5; i += appointmentsPerDay, dayIndex++) {
                 const dayAppointments = regionAppts.slice(i, i + appointmentsPerDay);
-                if (dayAppointments.length > 0) {
-                    await this.planDayEfficiently(
+                if (dayAppointments.length > 0 && weekHours < this.constraints.maxWorkHoursPerWeek) {
+                    const remaining = await this.planDayEfficiently(
                         week[dayIndex],
                         dayAppointments,
                         regionName,
                         previousDayOvernight
                     );
                     previousDayOvernight = week[dayIndex].overnight;
+                    weekHours += week[dayIndex].totalHours;
+                    if (remaining && remaining.length > 0) {
+                        regionAppts.splice(i + appointmentsPerDay, 0, ...remaining);
+                    }
                     if (dayIndex > 0 && week[dayIndex].requiresPreviousDayOvernight) {
                         const prevDay = week[dayIndex - 1];
                         if (!prevDay.overnight) {
@@ -176,12 +208,14 @@ class IntelligentRoutePlanner {
                         }
                     }
                 }
+                if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
             }
+            if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
         }
         console.log(`💰 Nur ${this.apiCallsCount} API Calls verwendet!`);
         return week;
     }
-
+            
     // ======================================================================
     // REST DER FUNKTIONEN BLEIBT GLEICH
     // ======================================================================
