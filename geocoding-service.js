@@ -15,6 +15,27 @@ class EnhancedGeocodingService {
         this.cache = new Map(); // Simple in-memory cache
         this.googleApiDisabled = false;
         this.db = dbInstance;
+
+        if (this.db) {
+            this.db.run(
+                `CREATE TABLE IF NOT EXISTS geocoding_cache (
+                    address TEXT PRIMARY KEY,
+                    lat REAL NOT NULL,
+                    lng REAL NOT NULL,
+                    formatted_address TEXT,
+                    accuracy TEXT,
+                    method TEXT,
+                    cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`,
+                (err) => {
+                    if (err) {
+                        console.error('❌ Geocoding Cache Tabelle konnte nicht erstellt werden:', err.message);
+                    } else {
+                        console.log('✅ Geocoding Cache Tabelle verifiziert');
+                    }
+                }
+            );
+        }
         
         // Deutsche Städte mit präzisen Koordinaten
         this.germanCitiesDatabase = new Map([
