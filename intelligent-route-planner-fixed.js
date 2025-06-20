@@ -95,6 +95,9 @@ class IntelligentRoutePlanner {
         let currentLocation = firstAppt;
         const remaining = [];
         for (let i = 1; i < sortedAppts.length; i++) {
+        let currentLocation = startLocation;
+        const remaining = [];
+        for (let i = 0; i < sortedAppts.length; i++) {
             const apt = sortedAppts[i];
             const travelDist = await this.getDistance(currentLocation, apt);
 
