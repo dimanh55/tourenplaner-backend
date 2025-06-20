@@ -520,7 +520,7 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
             });
         }
 
-        const IntelligentRoutePlanner = require('./intelligent-route-planner-fixed.js');
+        const IntelligentRoutePlanner = require('./intelligent-route-planner-fixed');
         const planner = new IntelligentRoutePlanner(db);
         const optimizedRoute = await planner.optimizeWeek(selectedAppointments, weekStart, driverId || 1);
 
