@@ -95,10 +95,6 @@ class IntelligentRoutePlanner {
         let currentLocation = firstAppt;
         const remaining = [];
         for (let i = 1; i < sortedAppts.length; i++) {
-
-        let currentLocation = startLocation;
-        const remaining = [];
-        for (let i = 0; i < sortedAppts.length; i++) {
             const apt = sortedAppts[i];
             const travelDist = await this.getDistance(currentLocation, apt);
 
@@ -187,52 +183,6 @@ class IntelligentRoutePlanner {
 
         const sortedRegions = this.sortRegionsByDistance(regions);
         let dayIndex = 0;
-        let previousOvernight = null;
-        let weekHours = 0;
-
-        for (const regionName of sortedRegions) {
-            const regionAppts = regions[regionName].appointments;
-            if (regionAppts.length === 0) continue;
-
-            const appointmentsPerDay = Math.ceil(
-                regionAppts.length / Math.max(1, 5 - dayIndex)
-            );
-
-            for (
-                let i = 0;
-                i < regionAppts.length && dayIndex < 5;
-                i += appointmentsPerDay, dayIndex++
-            ) {
-                const dayAppts = regionAppts.slice(i, i + appointmentsPerDay);
-                if (dayAppts.length === 0) continue;
-
-                if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
-
-                const remaining = await this.planDayEfficiently(
-                    week[dayIndex],
-                    dayAppts,
-                    regionName,
-                    previousOvernight
-                );
-
-                previousOvernight = week[dayIndex].overnight;
-                weekHours += week[dayIndex].totalHours;
-
-                if (remaining && remaining.length > 0) {
-                    regionAppts.splice(i + appointmentsPerDay, 0, ...remaining);
-                }
-
-                if (dayIndex > 0 && week[dayIndex].requiresPreviousDayOvernight) {
-                    const prevDay = week[dayIndex - 1];
-                    if (!prevDay.overnight) {
-                        prevDay.overnight = {
-                            city: week[dayIndex].requiresPreviousDayOvernight.nearCity,
-                            reason: 'Übernachtung für frühen Start am nächsten Tag',
-                            hotel: week[dayIndex].requiresPreviousDayOvernight.suggestedHotel
-                        };
-                        console.log(
-                            `🏨 Vortags-Übernachtung hinzugefügt für ${prevDay.day}`
-                        );
         let previousDayOvernight = null;
         let weekHours = 0;
         for (const regionName of sortedRegions) {
