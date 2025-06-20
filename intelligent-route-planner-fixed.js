@@ -48,7 +48,8 @@ class IntelligentRoutePlanner {
             currentTime = this.constraints.workStartTime;
             console.log(`🏨 Starte Tag von ${previousDayOvernight.city}`);
         }
-        const firstDist = await this.getDistance(startLocation, sortedAppts[0]);
+        const firstAppt = sortedAppts[0];
+        const firstDist = await this.getDistance(startLocation, firstAppt);
         const requiredDepartureTime = currentTime - firstDist.duration;
         if (!previousDayOvernight && requiredDepartureTime < this.constraints.workStartTime) {
             console.log(`⚠️ Anreise zum ersten Termin würde Abfahrt um ${this.formatTime(requiredDepartureTime)} erfordern`);
@@ -72,20 +73,28 @@ class IntelligentRoutePlanner {
             currentTime += hotelToFirstDist.duration;
         } else {
             const departureTime = Math.max(
-                previousDayOvernight ? 7 : this.constraints.workStartTime,
+                this.constraints.workStartTime,
                 requiredDepartureTime
             );
             currentTime = departureTime + firstDist.duration;
             day.travelSegments.push({
                 type: previousDayOvernight ? 'departure_from_hotel' : 'departure',
                 from: previousDayOvernight ? previousDayOvernight.city : 'Hannover',
-                to: this.getCityName(sortedAppts[0].address),
+                to: this.getCityName(firstAppt.address),
                 distance: Math.round(firstDist.distance),
                 duration: firstDist.duration,
                 startTime: this.formatTime(departureTime),
                 endTime: this.formatTime(currentTime)
             });
         }
+        // Erstes Meeting direkt nach der Anreise einplanen
+        firstAppt.startTime = this.formatTime(currentTime);
+        firstAppt.endTime = this.formatTime(currentTime + this.constraints.appointmentDuration);
+        day.appointments.push(firstAppt);
+        currentTime += this.constraints.appointmentDuration;
+        let currentLocation = firstAppt;
+        const remaining = [];
+        for (let i = 1; i < sortedAppts.length; i++) {
         let currentLocation = startLocation;
         const remaining = [];
         for (let i = 0; i < sortedAppts.length; i++) {
