@@ -1,11 +1,10 @@
-\
 const axios = require('axios');
 
 /**
  * Intelligente Wochen- und Tagesplanung nach euren Regeln:
  * - 40h pro Woche, max. 10h pro Tag
  * - Start täglich 08:30, Fahrzeit zählt als Arbeitszeit
- * - Pausen: >6h = 30 Min, >9h = +30 Min (insgesamt 60 Min), in 30‑Minuten‑Blöcken
+ * - Pausen: >6h = 30 Min, >9h = +30 Min (insgesamt 60 Min), in 30-Minuten-Blöcken
  * - Termine nur zu :00 oder :30
  * - Freitag: Rückkehr nach Hannover bis 17:00 zwingend
  * - Übernachtungen Mo–Do erlaubt und gewünscht, inkl. Vorpositionierung
@@ -134,10 +133,8 @@ class IntelligentRoutePlanner {
         const leg = await this.getDistance(last, next);
 
         // Prüfe, ob noch Platz im 10h-Tag
-        const dayStart = this.constraints.workStartTime;
         const now = this.timeToHours(day.appointments[day.appointments.length - 1].endTime);
         const nextStartCandidate = this.roundToHalfHourUp(now + leg.duration);
-        const wouldEnd = nextStartCandidate + this.constraints.appointmentDuration;
         const workedSoFar = (this.computeWorkHours(day) + this.computeTravelHours(day));
         const remaining = this.constraints.maxWorkHoursPerDay - workedSoFar;
 
@@ -183,7 +180,6 @@ class IntelligentRoutePlanner {
   // -------------------------------------------------------------------
   async findSlotAround(day, appointment) {
     // Erzeuge Zeitslots zwischen bestehenden Terminen
-    const slots = [];
     const startOfDay = this.constraints.workStartTime;
     const endOfDay = day.day === 'Freitag' ? 17 : startOfDay + this.constraints.maxWorkHoursPerDay;
 
@@ -194,7 +190,7 @@ class IntelligentRoutePlanner {
     if (allBlocks.length === 0) {
       windows.push({ from: startOfDay, to: endOfDay });
     } else {
-      if (this.timeToHours(allBlocks[0].startTime) - startOfDay >= 0.0) {
+      if (this.timeToHours(allBlocks[0].startTime) - startOfDay >= 0) {
         windows.push({ from: startOfDay, to: this.timeToHours(allBlocks[0].startTime) });
       }
       for (let i = 0; i < allBlocks.length - 1; i++) {
@@ -204,7 +200,7 @@ class IntelligentRoutePlanner {
       windows.push({ from: this.timeToHours(allBlocks[allBlocks.length-1].endTime), to: endOfDay });
     }
 
-    // Prüfe Fenster der Größe: Reisehin + 3h + Reisewieder + ggf. Puffer
+    // Prüfe Fenster der Größe: Reisehin + 3h + Reisewieder + Puffer
     for (const w of windows) {
       const from = Math.max(startOfDay, this.roundToHalfHourUp(w.from));
       const to = Math.min(endOfDay, w.to);
@@ -214,11 +210,11 @@ class IntelligentRoutePlanner {
       const last = day.appointments.find(a => this.timeToHours(a.endTime) <= from) || null;
       const next = day.appointments.find(a => this.timeToHours(a.startTime) >= to) || null;
 
-      const travelIn = last ? (this.haversineDistance(last.lat, last.lng, appointment.lat, appointment.lng)/80 + 0.25) : 0.75;
-      const travelOut = next ? (this.haversineDistance(appointment.lat, appointment.lng, next.lat, next.lng)/80 + 0.25) : 0.75;
+      const travelInGuess = last ? (this.haversineDistance(last.lat, last.lng, appointment.lat, appointment.lng)/80 + 0.25) : 0.75;
+      const travelOutGuess = next ? (this.haversineDistance(appointment.lat, appointment.lng, next.lat, next.lng)/80 + 0.25) : 0.75;
 
-      const earliestStart = this.roundToHalfHourUp(from + travelIn);
-      const latestEnd = to - travelOut;
+      const earliestStart = this.roundToHalfHourUp(from + travelInGuess);
+      const latestEnd = to - travelOutGuess;
 
       if (earliestStart + this.constraints.appointmentDuration <= latestEnd) {
         // echte Travel-Objekte berechnen
@@ -266,7 +262,7 @@ class IntelligentRoutePlanner {
 
     // Mo–Do: Overnight, wenn Heimfahrt unklug (zu weit/spät)
     const distanceKm = toHome.distance;
-    if (day.day !== 'Freitag' and (distanceKm > this.constraints.overnightThresholdKm || arrive > (this.constraints.workStartTime + this.constraints.maxWorkHoursPerDay))) {
+    if (day.day !== 'Freitag' && (distanceKm > this.constraints.overnightThresholdKm || arrive > (this.constraints.workStartTime + this.constraints.maxWorkHoursPerDay))) {
       day.overnight = this.makeOvernight(last, distanceKm > this.constraints.overnightThresholdKm
         ? `${Math.round(distanceKm)} km bis Hannover`
         : `Rückkehr erst ${this.hoursToTime(arrive)}`);
@@ -290,8 +286,8 @@ class IntelligentRoutePlanner {
 
   placeTravelIfNeeded(day, leg) {
     if (!leg) return;
-    const last = day.travelSegments?.[day.travelSegments.length - 1];
-    const start = this.roundToHalfHourUp(this.timeToHours(day.appointments[day.appointments.length - 1]?.endTime || this.constraints.workStartTime));
+    const after = this.timeToHours(day.appointments[day.appointments.length - 1]?.endTime || this.constraints.workStartTime);
+    const start = this.roundToHalfHourUp(after);
     const end = start + leg.duration;
     this.placeTravel(day, 'travel', 'Unterwegs', 'Unterwegs', leg, start, end);
   }
@@ -330,7 +326,7 @@ class IntelligentRoutePlanner {
     if (hoursSoFar > 9) required = 1.0;
     else if (hoursSoFar > 6) required = 0.5;
 
-    // Prüfe vorhandene Pause-Blöcke
+    // vorhandene Pause-Blöcke
     const existing = (day.travelSegments || []).filter(s => s.type === 'break').reduce((h, s) => h + s.duration, 0);
 
     if (existing + 1e-6 < required) {
@@ -351,10 +347,10 @@ class IntelligentRoutePlanner {
   }
 
   computeWorkHours(day) {
-    return (day.appointments || []).reduce((sum, a) => sum + this.constraints.appointmentDuration, 0);
+    return (day.appointments || []).reduce((sum) => sum + this.constraints.appointmentDuration, 0);
   }
   computeTravelHours(day) {
-    return (day.travelSegments || []).reduce((sum, s) => sum + (s.type !== 'break' ? s.duration : s.duration), 0);
+    return (day.travelSegments || []).reduce((sum, s) => sum + s.duration, 0);
   }
 
   // -------------------------------------------------------------------
@@ -516,7 +512,7 @@ class IntelligentRoutePlanner {
   }
 
   // -------------------------------------------------------------------
-  // Datenbank‑Hilfen (geocoding_cache, distance_cache)
+  // Datenbank-Hilfen (geocoding_cache, distance_cache)
   // -------------------------------------------------------------------
   getGeocodeFromDB(address) {
     return new Promise((resolve) => {
