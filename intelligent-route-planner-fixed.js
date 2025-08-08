@@ -1,598 +1,639 @@
+\
 const axios = require('axios');
 
+/**
+ * Intelligente Wochen- und Tagesplanung nach euren Regeln:
+ * - 40h pro Woche, max. 10h pro Tag
+ * - Start täglich 08:30, Fahrzeit zählt als Arbeitszeit
+ * - Pausen: >6h = 30 Min, >9h = +30 Min (insgesamt 60 Min), in 30‑Minuten‑Blöcken
+ * - Termine nur zu :00 oder :30
+ * - Freitag: Rückkehr nach Hannover bis 17:00 zwingend
+ * - Übernachtungen Mo–Do erlaubt und gewünscht, inkl. Vorpositionierung
+ * - Google Distance Matrix mit starkem Caching, Fallback auf Haversine
+ */
 class IntelligentRoutePlanner {
-    constructor(db) {
-        this.db = db;
-        this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
-        this.distanceCache = new Map();
-        this.apiCallsCount = 0;
-        this.constraints = {
-            maxWorkHoursPerWeek: 40,
-            maxWorkHoursPerDay: 8,
-            workStartTime: 8.5,
-            workEndTime: 17,
-            appointmentDuration: 3,
-            homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
-            travelTimePadding: 0.25,
-            overnightThreshold: 100
-        };
+  constructor(db) {
+    this.db = db;
+    this.apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    this.distanceCache = new Map();
+    this.apiCallsCount = 0;
+
+    this.constraints = {
+      maxWorkHoursPerWeek: 40,
+      maxWorkHoursPerDay: 10,
+      workStartTime: 8.5,      // 08:30
+      appointmentDuration: 3,  // 3h pro Dreh
+      homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
+      travelTimePadding: 0.25, // 15 Min Puffer
+      overnightThresholdKm: 120 // Heimfahrt vermeiden, wenn >120 km
+    };
+  }
+
+  // -------------------------------------------------------------------
+  // Öffentliche Hauptfunktion
+  // -------------------------------------------------------------------
+  async optimizeWeek(appointments, weekStart, driverId) {
+    const geoAppointments = await this.ensureGeocoding(appointments);
+    const { regions, fixedAppointments } = this.clusterByRegion(geoAppointments);
+    const week = this.initializeWeek(weekStart);
+
+    // Feste Termine unverrückbar einplanen
+    this.scheduleFixedAppointments(week, fixedAppointments);
+
+    // Flexible Termine nach Regionen abarbeiten
+    const regionOrder = this.sortRegionsByDistance(regions);
+    let previousOvernight = null;
+    let weekHours = 0;
+
+    for (let dayIdx = 0; dayIdx < 5; dayIdx++) {
+      const day = week[dayIdx];
+      const regionName = regionOrder[dayIdx % regionOrder.length] || 'Mitte';
+      const bucket = regions[regionName]?.appointments || [];
+      if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
+
+      // Flexible Slots des Tages ermitteln (Lücken neben FIX-Terminen)
+      const flexibleCandidates = this.pickFlexibleForDay(day.date, bucket, 6); // bis zu 6 flexible Kandidaten in die Tagesplanung geben
+      const remaining = await this.planDayEfficiently(day, flexibleCandidates, regionName, previousOvernight);
+
+      // Übrig gebliebenes wieder an die Region zurückhängen
+      if (remaining && remaining.length) bucket.unshift(...remaining);
+
+      previousOvernight = day.overnight;
+      weekHours += (day.totalHours || 0);
     }
 
-    // ======================================================================
-    // HAUPTFUNKTION: Intelligente Routenoptimierung
-    // ======================================================================
-    async optimizeWeek(appointments, weekStart, driverId) {
-        console.log('🧠 Starte KORRIGIERTE Routenplanung...');
-        try {
-            const geoAppointments = await this.ensureGeocoding(appointments);
-            const clusters = this.clusterByRegion(geoAppointments);
-            const week = await this.planWeekEfficiently(clusters, geoAppointments, weekStart);
-            return this.formatWeekResult(week, weekStart);
-        } catch (error) {
-            console.error('❌ Routenplanung fehlgeschlagen:', error);
-            throw error;
+    return this.formatWeekResult(week, weekStart);
+  }
+
+  // -------------------------------------------------------------------
+  // Tagesplanung: berücksichtigt Pausen, Übernachtung, 10h/Tag, 17:00 Fr.
+  // -------------------------------------------------------------------
+  async planDayEfficiently(day, appointments, regionName, previousDayOvernight = null) {
+    day.travelSegments = day.travelSegments || [];
+    day.appointments = day.appointments || [];
+
+    // Sortiere flexible Termine nach Nähe zur Startposition
+    const startLocation = previousDayOvernight?.location || this.constraints.homeBase;
+    let currentTime = this.constraints.workStartTime;
+
+    // Falls bereits FIX-Termine existieren, sortiere Zeitachse mit ihnen
+    day.appointments.sort((a, b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime));
+
+    // Wenn der Tag noch leer (keine FIX) ist, beginne mit dem nächstgelegenen flexiblen Termin
+    const pending = [...appointments];
+    const planned = [];
+
+    // Wenn es bereits FIX-Termine gibt: versuche Lücken zu füllen
+    if (day.appointments.length > 0) {
+      for (const apt of pending) {
+        const slot = await this.findSlotAround(day, apt);
+        if (slot) {
+          this.placeTravelIfNeeded(day, slot.travelTo);
+          this.placeAppointment(day, apt, slot.start);
+          this.placeTravelIfNeeded(day, slot.travelFrom);
+          planned.push(apt);
         }
-    }
+        // Pausen nachziehen
+        this.ensureBreaks(day);
+      }
+    } else {
+      // Tag ohne FIX: baue eine Sequenz auf
+      // 1) Ersten Termin wählen (nächstgelegen zum Start)
+      pending.sort((a, b) => {
+        const da = this.haversineDistance(a.lat, a.lng, startLocation.lat, startLocation.lng);
+        const db = this.haversineDistance(b.lat, b.lng, startLocation.lat, startLocation.lng);
+        return da - db;
+      });
 
-    // ======================================================================
-    // KORRIGIERT: TAG EFFIZIENT PLANEN MIT ÜBERNACHTUNGSPRÜFUNG
-    // ======================================================================
-    async planDayEfficiently(day, appointments, regionName, previousDayOvernight = null) {
-        if (appointments.length === 0) return;
-        console.log(`📅 Plane ${day.day}: ${appointments.length} Termine in Region ${regionName}`);
-        const sortedAppts = this.sortAppointmentsByDistance(appointments);
-        let startLocation = this.constraints.homeBase;
-        let currentTime = this.constraints.workStartTime;
-        if (previousDayOvernight) {
-            startLocation = previousDayOvernight.location;
-            currentTime = this.constraints.workStartTime;
-            console.log(`🏨 Starte Tag von ${previousDayOvernight.city}`);
-        }
-        const firstAppt = sortedAppts[0];
-        const firstDist = await this.getDistance(startLocation, firstAppt);
-        const requiredDepartureTime = currentTime - firstDist.duration;
-        if (!previousDayOvernight && requiredDepartureTime < this.constraints.workStartTime) {
-            console.log(`⚠️ Anreise zum ersten Termin würde Abfahrt um ${this.formatTime(requiredDepartureTime)} erfordern`);
-            console.log(`🏨 Übernachtung am Vortag erforderlich!`);
-            day.requiresPreviousDayOvernight = {
-                nearCity: this.getCityName(sortedAppts[0].address),
-                reason: `Fahrt von Hannover würde ${Math.round(firstDist.duration * 60)} Min dauern - zu frühe Abfahrt`,
-                suggestedHotel: `Hotel nahe ${this.getCityName(sortedAppts[0].address)}`
-            };
-            currentTime = this.constraints.workStartTime;
-            const hotelToFirstDist = { distance: 10, duration: 0.25 };
-            day.travelSegments.push({
-                type: 'departure_from_hotel',
-                from: `Hotel ${this.getCityName(sortedAppts[0].address)}`,
-                to: this.getCityName(sortedAppts[0].address),
-                distance: Math.round(hotelToFirstDist.distance),
-                duration: hotelToFirstDist.duration,
-                startTime: this.formatTime(currentTime),
-                endTime: this.formatTime(currentTime + hotelToFirstDist.duration)
-            });
-            currentTime += hotelToFirstDist.duration;
-        } else {
-            const departureTime = Math.max(
-                this.constraints.workStartTime,
-                requiredDepartureTime
-            );
-            currentTime = departureTime + firstDist.duration;
-            day.travelSegments.push({
-                type: previousDayOvernight ? 'departure_from_hotel' : 'departure',
-                from: previousDayOvernight ? previousDayOvernight.city : 'Hannover',
-                to: this.getCityName(firstAppt.address),
-                distance: Math.round(firstDist.distance),
-                duration: firstDist.duration,
-                startTime: this.formatTime(departureTime),
-                endTime: this.formatTime(currentTime)
-            });
-        }
-        // Erstes Meeting direkt nach der Anreise einplanen
-        firstAppt.startTime = this.formatTime(currentTime);
-        firstAppt.endTime = this.formatTime(currentTime + this.constraints.appointmentDuration);
-        day.appointments.push(firstAppt);
-        currentTime += this.constraints.appointmentDuration;
-        let currentLocation = firstAppt;
-        const remaining = [];
-        for (let i = 1; i < sortedAppts.length; i++) {
-            const apt = sortedAppts[i];
-            const travelDist = await this.getDistance(currentLocation, apt);
+      const first = pending.shift();
+      if (first) {
+        const toFirst = await this.getDistance(startLocation, first);
+        // Abfahrt nicht vor 08:30; runde auf :00/:30
+        let departAt = Math.max(this.constraints.workStartTime, currentTime);
+        departAt = this.roundToHalfHourUp(departAt);
+        const arriveAt = departAt + toFirst.duration;
+        this.placeTravel(day, previousDayOvernight ? 'departure_from_hotel' : 'departure',
+                         previousDayOvernight ? previousDayOvernight.city : 'Hannover',
+                         this.getCityName(first.address), toFirst, departAt, arriveAt);
 
-            if (currentTime + travelDist.duration + this.constraints.appointmentDuration > this.constraints.workEndTime) {
-                if (currentTime + travelDist.duration <= this.constraints.workEndTime) {
-                    day.travelSegments.push({
-                        type: 'travel',
-                        from: currentLocation.name ? currentLocation.name : this.getCityName(currentLocation.address),
-                        to: this.getCityName(apt.address),
-                        distance: Math.round(travelDist.distance),
-                        duration: travelDist.duration,
-                        startTime: this.formatTime(currentTime),
-                        endTime: this.formatTime(currentTime + travelDist.duration)
-                    });
-                    currentTime += travelDist.duration;
-                    day.overnight = {
-                        city: this.getCityName(apt.address),
-                        location: { lat: apt.lat, lng: apt.lng },
-                        reason: 'Arbeitszeitende erreicht'
-                    };
-                }
-                remaining.push(...sortedAppts.slice(i));
-                break;
-            }
+        const startAt = this.roundToHalfHourUp(arriveAt);
+        this.placeAppointment(day, first, startAt);
+        planned.push(first);
+      }
 
-            if (travelDist.duration > 0) {
-                day.travelSegments.push({
-                    type: 'travel',
-                    from: currentLocation.name ? currentLocation.name : this.getCityName(currentLocation.address),
-                    to: this.getCityName(apt.address),
-                    distance: Math.round(travelDist.distance),
-                    duration: travelDist.duration,
-                    startTime: this.formatTime(currentTime),
-                    endTime: this.formatTime(currentTime + travelDist.duration)
-                });
-                currentTime += travelDist.duration;
-            }
-
-            apt.startTime = this.formatTime(currentTime);
-            apt.endTime = this.formatTime(currentTime + this.constraints.appointmentDuration);
-            day.appointments.push(apt);
-            currentTime += this.constraints.appointmentDuration;
-            currentLocation = apt;
-        }
-        const lastApt = day.appointments.length > 0 ? day.appointments[day.appointments.length - 1] : startLocation;
-        const homeDist = await this.getDistance(lastApt, this.constraints.homeBase);
-        const arrivalTimeHome = currentTime + homeDist.duration;
-        const endLimit = day.day === 'Freitag' ? this.constraints.workEndTime : this.constraints.workEndTime;
-        if (day.overnight || homeDist.distance > this.constraints.overnightThreshold || arrivalTimeHome > endLimit) {
-            const overnightCity = this.getCityName(lastApt.address);
-            day.overnight = {
-                city: overnightCity,
-                location: { lat: lastApt.lat, lng: lastApt.lng },
-                reason: homeDist.distance > this.constraints.overnightThreshold ?
-                    `${Math.round(homeDist.distance)}km von Hannover - zu weit für Rückfahrt` :
-                    `Ankunft in Hannover wäre erst ${this.formatTime(arrivalTimeHome)} - zu spät`,
-                checkIn: this.formatTime(currentTime + 0.5),
-                hotel: `🏨 Hotel in ${overnightCity}`
-            };
-            console.log(`🏨 Übernachtung in ${overnightCity} geplant`);
-        } else {
-            day.travelSegments.push({
-                type: 'return',
-                from: this.getCityName(lastApt.address),
-                to: 'Hannover',
-                distance: Math.round(homeDist.distance),
-                duration: homeDist.duration,
-                startTime: this.formatTime(currentTime),
-                endTime: this.formatTime(currentTime + homeDist.duration)
-            });
-            currentTime += homeDist.duration;
-        }
-        day.workTime = day.appointments.length * this.constraints.appointmentDuration;
-        day.travelTime = day.travelSegments.reduce((sum, seg) => sum + seg.duration, 0);
-        day.totalHours = day.workTime + day.travelTime;
-        return remaining;
-    }
-
-    // ======================================================================
-    // WOCHENPLANUNG MIT BERICHTIGTEM STUNDENLIMIT UND ÜBERNACHTUNG
-    // ======================================================================
-    async planWeekEfficiently(clusters, allAppointments, weekStart) {
-        const week = this.initializeWeek(weekStart);
-        const { regions, fixedAppointments } = clusters;
-        this.scheduleFixedAppointments(week, fixedAppointments);
-
-        const sortedRegions = this.sortRegionsByDistance(regions);
-        let dayIndex = 0;
-        let previousDayOvernight = null;
-        let weekHours = 0;
-        for (const regionName of sortedRegions) {
-            const regionAppts = regions[regionName].appointments;
-            if (regionAppts.length === 0) continue;
-            const appointmentsPerDay = Math.ceil(regionAppts.length / (5 - dayIndex));
-            for (let i = 0; i < regionAppts.length && dayIndex < 5; i += appointmentsPerDay, dayIndex++) {
-                const dayAppointments = regionAppts.slice(i, i + appointmentsPerDay);
-                if (dayAppointments.length > 0 && weekHours < this.constraints.maxWorkHoursPerWeek) {
-                    const remaining = await this.planDayEfficiently(
-                        week[dayIndex],
-                        dayAppointments,
-                        regionName,
-                        previousDayOvernight
-                    );
-                    previousDayOvernight = week[dayIndex].overnight;
-                    weekHours += week[dayIndex].totalHours;
-                    if (remaining && remaining.length > 0) {
-                        regionAppts.splice(i + appointmentsPerDay, 0, ...remaining);
-                    }
-                    if (dayIndex > 0 && week[dayIndex].requiresPreviousDayOvernight) {
-                        const prevDay = week[dayIndex - 1];
-                        if (!prevDay.overnight) {
-                            prevDay.overnight = {
-                                city: week[dayIndex].requiresPreviousDayOvernight.nearCity,
-                                reason: 'Übernachtung für frühen Start am nächsten Tag',
-                                hotel: week[dayIndex].requiresPreviousDayOvernight.suggestedHotel
-                            };
-                            console.log(`🏨 Vortags-Übernachtung hinzugefügt für ${prevDay.day}`);
-                        }
-                    }
-                }
-                if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
-            }
-            if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
-        }
-
-        console.log(`💰 Nur ${this.apiCallsCount} API Calls verwendet!`);
-        return week;
-    }
-            
-    // ======================================================================
-    // REST DER FUNKTIONEN BLEIBT GLEICH
-    // ======================================================================
-
-    async ensureGeocoding(appointments) {
-        const needsGeocoding = appointments.filter(apt => !apt.lat || !apt.lng);
-        if (needsGeocoding.length > 0) {
-            console.log(`🗺️ Nur ${needsGeocoding.length} von ${appointments.length} Terminen brauchen Geocoding`);
-            for (const apt of needsGeocoding) {
-                try {
-                    const coords = await this.geocodeAddress(apt.address);
-                    apt.lat = coords.lat;
-                    apt.lng = coords.lng;
-                    apt.geocoded = true;
-                } catch (error) {
-                    console.warn(`⚠️ Geocoding fehlgeschlagen für ${apt.address}`);
-                }
-            }
-        }
-        return appointments.filter(apt => apt.lat && apt.lng);
-    }
-
-    async geocodeAddress(address) {
-        const cityCoords = this.getCityCoordinates(address);
-        if (cityCoords) return cityCoords;
-        this.apiCallsCount++;
-        const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
-            params: {
-                address: address,
-                key: this.apiKey,
-                region: 'de'
-            }
+      // 2) Weitere Termine sequenziell in Reichweite einplanen
+      while (pending.length) {
+        // Wähle den nächsten Termin nahe beim aktuellen Standort
+        const last = day.appointments[day.appointments.length - 1];
+        pending.sort((a, b) => {
+          const da = this.haversineDistance(a.lat, a.lng, last.lat, last.lng);
+          const db = this.haversineDistance(b.lat, b.lng, last.lat, last.lng);
+          return da - db;
         });
-        if (response.data.status === 'OK' && response.data.results.length > 0) {
-            const location = response.data.results[0].geometry.location;
-            return { lat: location.lat, lng: location.lng };
+        const next = pending.shift();
+        const leg = await this.getDistance(last, next);
+
+        // Prüfe, ob noch Platz im 10h-Tag
+        const dayStart = this.constraints.workStartTime;
+        const now = this.timeToHours(day.appointments[day.appointments.length - 1].endTime);
+        const nextStartCandidate = this.roundToHalfHourUp(now + leg.duration);
+        const wouldEnd = nextStartCandidate + this.constraints.appointmentDuration;
+        const workedSoFar = (this.computeWorkHours(day) + this.computeTravelHours(day));
+        const remaining = this.constraints.maxWorkHoursPerDay - workedSoFar;
+
+        if (remaining < (leg.duration + this.constraints.appointmentDuration)) {
+          // Fahrt ggf. noch durchführen, um für Overnight zu positionieren
+          if (remaining >= leg.duration) {
+            this.placeTravel(day, 'travel', this.getCityName(last.address), this.getCityName(next.address),
+                             leg, this.roundToHalfHourUp(now), this.roundToHalfHourUp(now) + leg.duration);
+            // Overnight am Ziel
+            day.overnight = this.makeOvernight(next, 'Arbeitszeitende erreicht');
+          }
+          // Nächster Termin bleibt für Folgetage
+          pending.unshift(next);
+          break;
         }
-        throw new Error('Geocoding fehlgeschlagen');
+
+        // Reise + Termin einplanen
+        this.placeTravel(day, 'travel', this.getCityName(last.address), this.getCityName(next.address),
+                         leg, this.roundToHalfHourUp(now), nextStartCandidate);
+        this.placeAppointment(day, next, nextStartCandidate);
+        planned.push(next);
+
+        // Pausen einziehen
+        this.ensureBreaks(day);
+      }
     }
 
-    clusterByRegion(appointments) {
-        const regions = {
-            'Nord': { center: { lat: 53.5, lng: 10.0 }, appointments: [] },
-            'Ost': { center: { lat: 52.5, lng: 13.4 }, appointments: [] },
-            'West': { center: { lat: 51.2, lng: 7.0 }, appointments: [] },
-            'Süd': { center: { lat: 48.5, lng: 11.5 }, appointments: [] },
-            'Mitte': { center: { lat: 50.5, lng: 9.0 }, appointments: [] }
-        };
-        const fixed = appointments.filter(apt => apt.is_fixed && apt.fixed_date);
-        const flexible = appointments.filter(apt => !apt.is_fixed);
-        flexible.forEach(apt => {
-            let minDistance = Infinity;
-            let bestRegion = 'Mitte';
-            Object.entries(regions).forEach(([name, data]) => {
-                const dist = this.haversineDistance(apt.lat, apt.lng, data.center.lat, data.center.lng);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    bestRegion = name;
-                }
-            });
-            regions[bestRegion].appointments.push(apt);
-        });
-        return { regions, fixedAppointments: fixed };
+    // Tagesabschluss: Rückfahrt oder Overnight
+    await this.finishDayWithReturnOrOvernight(day);
+
+    // Kennzahlen
+    day.workTime = this.computeWorkHours(day);
+    day.travelTime = this.computeTravelHours(day);
+    day.totalHours = day.workTime + day.travelTime;
+
+    // Termine, die heute nicht mehr passten, zurückgeben
+    const remaining = appointments.filter(a => !planned.includes(a));
+    return remaining;
+  }
+
+  // -------------------------------------------------------------------
+  // Slot-Suche zwischen/um bestehende FIX-Termine
+  // -------------------------------------------------------------------
+  async findSlotAround(day, appointment) {
+    // Erzeuge Zeitslots zwischen bestehenden Terminen
+    const slots = [];
+    const startOfDay = this.constraints.workStartTime;
+    const endOfDay = day.day === 'Freitag' ? 17 : startOfDay + this.constraints.maxWorkHoursPerDay;
+
+    const allBlocks = [...day.appointments].sort((a, b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime));
+    const windows = [];
+
+    // Fenster vor erstem Termin
+    if (allBlocks.length === 0) {
+      windows.push({ from: startOfDay, to: endOfDay });
+    } else {
+      if (this.timeToHours(allBlocks[0].startTime) - startOfDay >= 0.0) {
+        windows.push({ from: startOfDay, to: this.timeToHours(allBlocks[0].startTime) });
+      }
+      for (let i = 0; i < allBlocks.length - 1; i++) {
+        windows.push({ from: this.timeToHours(allBlocks[i].endTime), to: this.timeToHours(allBlocks[i+1].startTime) });
+      }
+      // Fenster nach letztem Termin
+      windows.push({ from: this.timeToHours(allBlocks[allBlocks.length-1].endTime), to: endOfDay });
     }
 
-    async getDistance(from, to) {
-        const cacheKey = `${from.lat},${from.lng}-${to.lat},${to.lng}`;
-        if (this.distanceCache.has(cacheKey)) {
-            return this.distanceCache.get(cacheKey);
+    // Prüfe Fenster der Größe: Reisehin + 3h + Reisewieder + ggf. Puffer
+    for (const w of windows) {
+      const from = Math.max(startOfDay, this.roundToHalfHourUp(w.from));
+      const to = Math.min(endOfDay, w.to);
+      if (to - from < (this.constraints.appointmentDuration + 0.25)) continue;
+
+      // Schätze Reisezeiten (Haversine + Puffer) – genauere Werte setzen wir beim Platzieren
+      const last = day.appointments.find(a => this.timeToHours(a.endTime) <= from) || null;
+      const next = day.appointments.find(a => this.timeToHours(a.startTime) >= to) || null;
+
+      const travelIn = last ? (this.haversineDistance(last.lat, last.lng, appointment.lat, appointment.lng)/80 + 0.25) : 0.75;
+      const travelOut = next ? (this.haversineDistance(appointment.lat, appointment.lng, next.lat, next.lng)/80 + 0.25) : 0.75;
+
+      const earliestStart = this.roundToHalfHourUp(from + travelIn);
+      const latestEnd = to - travelOut;
+
+      if (earliestStart + this.constraints.appointmentDuration <= latestEnd) {
+        // echte Travel-Objekte berechnen
+        const travelTo = last ? await this.getDistance(last, appointment) : null;
+        const travelFrom = next ? await this.getDistance(appointment, next) : null;
+        return { start: earliestStart, travelTo, travelFrom };
+      }
+    }
+    return null;
+  }
+
+  // -------------------------------------------------------------------
+  // Abschluss des Tages: Rückfahrt oder Overnight (Fr bis 17:00)
+  // -------------------------------------------------------------------
+  async finishDayWithReturnOrOvernight(day) {
+    const last = day.appointments[day.appointments.length - 1];
+    if (!last) return;
+
+    const toHome = await this.getDistance(last, this.constraints.homeBase);
+    const leaveAt = this.roundToHalfHourUp(this.timeToHours(last.endTime));
+    const arrive = leaveAt + toHome.duration;
+
+    const mustBeHome = day.day === 'Freitag';
+    const latestHome = 17;
+
+    if (mustBeHome && arrive > latestHome) {
+      // Termine vom Ende entfernen, bis Rückkehr 17:00 klappt
+      while (day.appointments.length) {
+        const removed = day.appointments.pop();
+        const prevLast = day.appointments[day.appointments.length - 1];
+        if (!prevLast) break;
+        const tryHome = await this.getDistance(prevLast, this.constraints.homeBase);
+        const tLeave = this.roundToHalfHourUp(this.timeToHours(prevLast.endTime));
+        const tArr = tLeave + tryHome.duration;
+        if (tArr <= latestHome) {
+          this.placeTravel(day, 'return', this.getCityName(prevLast.address), 'Hannover', tryHome, tLeave, tArr);
+          return;
         }
-        const dbCached = await this.getDistanceFromDB(from, to);
-        if (dbCached) {
-            this.distanceCache.set(cacheKey, dbCached);
-            return dbCached;
+      }
+      // Wenn keine Termine mehr: direkte Rückfahrt
+      const startFromFirst = this.constraints.workStartTime;
+      this.placeTravel(day, 'return', this.getCityName(last.address), 'Hannover', toHome, startFromFirst, startFromFirst + toHome.duration);
+      return;
+    }
+
+    // Mo–Do: Overnight, wenn Heimfahrt unklug (zu weit/spät)
+    const distanceKm = toHome.distance;
+    if (day.day !== 'Freitag' and (distanceKm > this.constraints.overnightThresholdKm || arrive > (this.constraints.workStartTime + this.constraints.maxWorkHoursPerDay))) {
+      day.overnight = this.makeOvernight(last, distanceKm > this.constraints.overnightThresholdKm
+        ? `${Math.round(distanceKm)} km bis Hannover`
+        : `Rückkehr erst ${this.hoursToTime(arrive)}`);
+      return;
+    }
+
+    // Rückfahrt
+    this.placeTravel(day, 'return', this.getCityName(last.address), 'Hannover', toHome, leaveAt, arrive);
+  }
+
+  // -------------------------------------------------------------------
+  // Platzierung Hilfsfunktionen
+  // -------------------------------------------------------------------
+  placeAppointment(day, apt, startHours) {
+    const start = this.roundToHalfHourUp(startHours);
+    const end = start + this.constraints.appointmentDuration;
+    const block = { ...apt, startTime: this.hoursToTime(start), endTime: this.hoursToTime(end) };
+    day.appointments.push(block);
+    day.appointments.sort((a,b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime));
+  }
+
+  placeTravelIfNeeded(day, leg) {
+    if (!leg) return;
+    const last = day.travelSegments?.[day.travelSegments.length - 1];
+    const start = this.roundToHalfHourUp(this.timeToHours(day.appointments[day.appointments.length - 1]?.endTime || this.constraints.workStartTime));
+    const end = start + leg.duration;
+    this.placeTravel(day, 'travel', 'Unterwegs', 'Unterwegs', leg, start, end);
+  }
+
+  placeTravel(day, type, fromLabel, toLabel, leg, startHours, endHours) {
+    day.travelSegments = day.travelSegments || [];
+    day.travelSegments.push({
+      type,
+      from: fromLabel,
+      to: toLabel,
+      distance: Math.round(leg.distance || 0),
+      duration: leg.duration,
+      startTime: this.hoursToTime(this.roundToHalfHourUp(startHours)),
+      endTime: this.hoursToTime(this.roundToHalfHourUp(endHours))
+    });
+  }
+
+  makeOvernight(atAppointment, reason) {
+    return {
+      city: this.getCityName(atAppointment.address),
+      location: { lat: atAppointment.lat, lng: atAppointment.lng },
+      reason,
+      checkIn: this.hoursToTime(this.roundToHalfHourUp(this.timeToHours(atAppointment.endTime) + 0.5)),
+      hotel: `Hotel in ${this.getCityName(atAppointment.address)}`
+    };
+  }
+
+  ensureBreaks(day) {
+    const worked = this.computeWorkHours(day);
+    const travel = this.computeTravelHours(day);
+    const hoursSoFar = worked + travel;
+
+    // >6h => 30min
+    // >9h => +30min
+    let required = 0;
+    if (hoursSoFar > 9) required = 1.0;
+    else if (hoursSoFar > 6) required = 0.5;
+
+    // Prüfe vorhandene Pause-Blöcke
+    const existing = (day.travelSegments || []).filter(s => s.type === 'break').reduce((h, s) => h + s.duration, 0);
+
+    if (existing + 1e-6 < required) {
+      const lastEnd = this.roundToHalfHourUp(this.timeToHours(day.appointments[day.appointments.length - 1].endTime));
+      const add = required - existing;
+      const start = lastEnd;
+      const end = start + add;
+      day.travelSegments.push({
+        type: 'break',
+        from: 'Pause',
+        to: 'Pause',
+        distance: 0,
+        duration: add,
+        startTime: this.hoursToTime(start),
+        endTime: this.hoursToTime(end)
+      });
+    }
+  }
+
+  computeWorkHours(day) {
+    return (day.appointments || []).reduce((sum, a) => sum + this.constraints.appointmentDuration, 0);
+  }
+  computeTravelHours(day) {
+    return (day.travelSegments || []).reduce((sum, s) => sum + (s.type !== 'break' ? s.duration : s.duration), 0);
+  }
+
+  // -------------------------------------------------------------------
+  // Fixe Termine platzieren (unverrückbar)
+  // -------------------------------------------------------------------
+  scheduleFixedAppointments(week, fixedAppointments) {
+    for (const apt of fixedAppointments) {
+      const idx = week.findIndex(d => d.date === apt.fixed_date);
+      if (idx < 0) continue;
+
+      const start = apt.fixed_time || '08:30';
+      const startH = this.roundToHalfHourUp(this.timeToHours(start));
+      const endH = startH + this.constraints.appointmentDuration;
+
+      week[idx].appointments.push({
+        ...apt,
+        startTime: this.hoursToTime(startH),
+        endTime: this.hoursToTime(endH)
+      });
+    }
+    // Chronologisch sortieren
+    week.forEach(d => d.appointments.sort((a,b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime)));
+  }
+
+  // -------------------------------------------------------------------
+  // Regionenbildung + Reihenfolge
+  // -------------------------------------------------------------------
+  clusterByRegion(appointments) {
+    const regions = {
+      'Nord':  { center: { lat: 53.5, lng: 10.0 }, appointments: [] },
+      'Ost':   { center: { lat: 52.5, lng: 13.4 }, appointments: [] },
+      'West':  { center: { lat: 51.2, lng: 7.0  }, appointments: [] },
+      'Süd':   { center: { lat: 48.5, lng: 11.5 }, appointments: [] },
+      'Mitte': { center: { lat: 50.5, lng: 9.0  }, appointments: [] }
+    };
+    const fixed = [];
+    for (const apt of appointments) {
+      if (apt.is_fixed && apt.fixed_date) {
+        fixed.push(apt);
+        continue;
+      }
+      let best = 'Mitte', bestDist = Infinity;
+      for (const [name, data] of Object.entries(regions)) {
+        const d = this.haversineDistance(apt.lat, apt.lng, data.center.lat, data.center.lng);
+        if (d < bestDist) { bestDist = d; best = name; }
+      }
+      regions[best].appointments.push(apt);
+    }
+    return { regions, fixedAppointments: fixed };
+  }
+
+  sortRegionsByDistance(regions) {
+    const from = this.constraints.homeBase;
+    const arr = Object.entries(regions).map(([name, data]) => ({
+      name, distance: this.haversineDistance(from.lat, from.lng, data.center.lat, data.center.lng)
+    }));
+    arr.sort((a,b) => a.distance - b.distance);
+    return arr.map(x => x.name);
+  }
+
+  pickFlexibleForDay(date, list, maxCount) {
+    // Nimm die ersten maxCount Elemente, bevorzugt bestätigte und mit größerem pipeline_days
+    const sorted = [...list].sort((a,b) => {
+      if ((a.status === 'bestätigt') !== (b.status === 'bestätigt'))
+        return a.status === 'bestätigt' ? -1 : 1;
+      return (b.pipeline_days || 0) - (a.pipeline_days || 0);
+    });
+    const take = sorted.splice(0, maxCount);
+    // Entferne die genommenen aus der Originalliste
+    for (const t of take) {
+      const idx = list.indexOf(t);
+      if (idx >= 0) list.splice(idx, 1);
+    }
+    return take;
+  }
+
+  // -------------------------------------------------------------------
+  // Geocoding + Distanz (Google Distance Matrix mit Caching)
+  // -------------------------------------------------------------------
+  async ensureGeocoding(appointments) {
+    const withCoords = [];
+    const needs = [];
+
+    for (const apt of appointments) {
+      if (apt.lat && apt.lng) { withCoords.push(apt); continue; }
+      needs.push(apt);
+    }
+    if (!needs.length) return [...withCoords];
+
+    if (!this.apiKey) throw new Error('Google Maps API Key nicht konfiguriert');
+
+    for (const apt of needs) {
+      // erst DB-Cache prüfen
+      const cached = await this.getGeocodeFromDB(apt.address);
+      if (cached) {
+        withCoords.push({ ...apt, lat: cached.lat, lng: cached.lng });
+        continue;
+      }
+      // API-Abfrage
+      const resp = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+        params: { address: apt.address, key: this.apiKey, region: 'de', components: 'country:DE' },
+        timeout: 4000
+      });
+      if (resp.data.status === 'OK' && resp.data.results?.length) {
+        const loc = resp.data.results[0].geometry.location;
+        withCoords.push({ ...apt, lat: loc.lat, lng: loc.lng });
+        await this.saveGeocodeToDB(apt.address, loc.lat, loc.lng, resp.data.results[0].formatted_address);
+      }
+    }
+    return withCoords;
+  }
+
+  async getDistance(from, to) {
+    const key = `${from.lat},${from.lng}-${to.lat},${to.lng}`;
+    if (this.distanceCache.has(key)) return this.distanceCache.get(key);
+
+    // DB-Cache
+    const dbCached = await this.getDistanceFromDB(from, to);
+    if (dbCached) {
+      this.distanceCache.set(key, dbCached);
+      return dbCached;
+    }
+
+    // Fallback-Haversine
+    const directKm = this.haversineDistance(from.lat, from.lng, to.lat, to.lng);
+
+    try {
+      const url = 'https://maps.googleapis.com/maps/api/distancematrix/json';
+      const params = {
+        key: this.apiKey,
+        mode: 'driving',
+        region: 'de',
+        origins: `${from.lat},${from.lng}`,
+        destinations: `${to.lat},${to.lng}`,
+        departure_time: 'now',
+        traffic_model: 'best_guess'
+      };
+      const resp = await axios.get(url, { params, timeout: 4000 });
+      this.apiCallsCount++;
+
+      const el = resp.data?.rows?.[0]?.elements?.[0];
+      if (el && el.status === 'OK') {
+        const dist = (el.distance?.value || 0) / 1000;
+        const durS = (el.duration_in_traffic?.value || el.duration?.value || 0);
+        const durationH = durS / 3600 + this.constraints.travelTimePadding;
+        const result = { distance: dist, duration: durationH, realtime: true, traffic_considered: !!el.duration_in_traffic };
+        this.distanceCache.set(key, result);
+        await this.saveDistanceToDB(from, to, result);
+        return result;
+      }
+    } catch (e) {
+      // still fall back
+    }
+
+    const fallback = { distance: directKm * 1.3, duration: directKm / 80 + this.constraints.travelTimePadding, approximated: true, fallback: true };
+    this.distanceCache.set(key, fallback);
+    await this.saveDistanceToDB(from, to, fallback);
+    return fallback;
+  }
+
+  // -------------------------------------------------------------------
+  // Datenbank‑Hilfen (geocoding_cache, distance_cache)
+  // -------------------------------------------------------------------
+  getGeocodeFromDB(address) {
+    return new Promise((resolve) => {
+      this.db.get(`SELECT lat, lng, formatted_address FROM geocoding_cache WHERE address = ?`, [address], (err, row) => {
+        if (err || !row) return resolve(null);
+        resolve({ lat: row.lat, lng: row.lng, formatted_address: row.formatted_address });
+      });
+    });
+  }
+  saveGeocodeToDB(address, lat, lng, formatted) {
+    return new Promise((resolve) => {
+      this.db.run(
+        `INSERT OR REPLACE INTO geocoding_cache (address, lat, lng, formatted_address, cached_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [address, lat, lng, formatted],
+        () => resolve()
+      );
+    });
+  }
+  getDistanceFromDB(from, to) {
+    return new Promise((resolve) => {
+      this.db.get(
+        `SELECT distance, duration FROM distance_cache WHERE origin_lat = ? AND origin_lng = ? AND dest_lat = ? AND dest_lng = ?`,
+        [from.lat, from.lng, to.lat, to.lng],
+        (err, row) => {
+          if (err || !row) return resolve(null);
+          resolve({ distance: row.distance, duration: row.duration });
         }
-        const directDistance = this.haversineDistance(from.lat, from.lng, to.lat, to.lng);
-        if (directDistance < 5) {
-            const result = {
-                distance: directDistance * 1.4,
-                duration: (directDistance / 30) + 0.1,
-                approximated: true
-            };
-            this.distanceCache.set(cacheKey, result);
-            this.saveDistanceToDB(from, to, result);
-            return result;
-        }
-        if (directDistance < 50) {
-            const result = {
-                distance: directDistance * 1.25,
-                duration: (directDistance / 60) + 0.2,
-                approximated: true
-            };
-            this.distanceCache.set(cacheKey, result);
-            this.saveDistanceToDB(from, to, result);
-            return result;
-        }
-        const similarRoute = await this.findSimilarRoute(from, to);
-        if (similarRoute) {
-            const adjustedResult = {
-                distance: similarRoute.distance * (0.9 + Math.random() * 0.2),
-                duration: similarRoute.duration * (0.9 + Math.random() * 0.2),
-                approximated: true,
-                basedOn: 'similar_route'
-            };
-            this.distanceCache.set(cacheKey, adjustedResult);
-            this.saveDistanceToDB(from, to, adjustedResult);
-            return adjustedResult;
-        }
-        try {
-            this.apiCallsCount++;
-            console.log(`🌐 API Call #${this.apiCallsCount} für ${Math.round(directDistance)}km Strecke`);
-            const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
-                params: {
-                    origins: `${from.lat},${from.lng}`,
-                    destinations: `${to.lat},${to.lng}`,
-                    key: this.apiKey,
-                    units: 'metric',
-                    mode: 'driving',
-                    avoid: 'tolls',
-                    departure_time: 'now',
-                    traffic_model: 'pessimistic'
-                }
-            });
-            if (response.data.status === 'OK') {
-                const element = response.data.rows[0].elements[0];
-                if (element.status === 'OK') {
-                    const result = {
-                        distance: element.distance.value / 1000,
-                        duration: (element.duration_in_traffic?.value || element.duration.value) / 3600 + 0.25,
-                        realtime: true,
-                        traffic_considered: !!element.duration_in_traffic
-                    };
-                    this.distanceCache.set(cacheKey, result);
-                    this.saveDistanceToDB(from, to, result);
-                    return result;
-                }
-            }
-        } catch (error) {
-            console.warn('⚠️ Distance Matrix API Fehler:', error.message);
-        }
-        const fallbackResult = {
-            distance: directDistance * 1.3,
-            duration: directDistance / 80 + 0.3,
-            approximated: true,
-            fallback: true
-        };
-        this.distanceCache.set(cacheKey, fallbackResult);
-        this.saveDistanceToDB(from, to, fallbackResult);
-        return fallbackResult;
-    }
+      );
+    });
+  }
+  saveDistanceToDB(from, to, obj) {
+    return new Promise((resolve) => {
+      this.db.run(
+        `INSERT OR REPLACE INTO distance_cache (origin_lat, origin_lng, dest_lat, dest_lng, distance, duration, cached_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [from.lat, from.lng, to.lat, to.lng, obj.distance, obj.duration],
+        () => resolve()
+      );
+    });
+  }
 
-    // Alle anderen Hilfsfunktionen bleiben gleich...
-    haversineDistance(lat1, lng1, lat2, lng2) {
-        const R = 6371;
-        const dLat = (lat2 - lat1) * Math.PI / 180;
-        const dLng = (lng2 - lng1) * Math.PI / 180;
-        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                  Math.sin(dLng/2) * Math.sin(dLng/2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-        return R * c;
-    }
+  // -------------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------------
+  timeToHours(t) {
+    if (!t) return 0;
+    const [h, m] = t.split(':').map(n => parseInt(n, 10));
+    return h + (m || 0) / 60;
+  }
+  hoursToTime(hours) {
+    const rounded = this.roundToHalfHourNearest(hours);
+    const h = Math.floor(rounded);
+    const m = Math.round((rounded - h) * 60);
+    return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+  }
+  roundToHalfHourUp(h) { return Math.ceil(h * 2) / 2; }
+  roundToHalfHourNearest(h) { return Math.round(h * 2) / 2; }
 
-    getCityCoordinates(address) {
-        const cities = {
-            'münchen': { lat: 48.1351, lng: 11.5820 },
-            'berlin': { lat: 52.5200, lng: 13.4050 },
-            'hamburg': { lat: 53.5511, lng: 9.9937 },
-            'köln': { lat: 50.9375, lng: 6.9603 },
-            'frankfurt': { lat: 50.1109, lng: 8.6821 },
-            'stuttgart': { lat: 48.7758, lng: 9.1829 },
-            'düsseldorf': { lat: 51.2277, lng: 6.7735 },
-            'leipzig': { lat: 51.3397, lng: 12.3731 },
-            'wolfsburg': { lat: 52.4227, lng: 10.7865 },
-            'augsburg': { lat: 48.3705, lng: 10.8978 },
-            'nürnberg': { lat: 49.4521, lng: 11.0767 }
-        };
-        const lowerAddress = address.toLowerCase();
-        for (const [city, coords] of Object.entries(cities)) {
-            if (lowerAddress.includes(city)) {
-                return coords;
-            }
-        }
-        return null;
-    }
+  getCityName(address) {
+    if (!address || typeof address !== 'string') return 'Unbekannt';
+    const m = address.match(/\d{5}\s+([^,]+)/);
+    return m ? m[1].trim() : address.split(',')[0].trim();
+  }
 
-    sortAppointmentsByDistance(appointments) {
-        if (appointments.length <= 1) return appointments;
-        const sorted = [appointments[0]];
-        const remaining = appointments.slice(1);
-        while (remaining.length > 0) {
-            const last = sorted[sorted.length - 1];
-            let minDist = Infinity;
-            let nearestIndex = 0;
-            remaining.forEach((apt, index) => {
-                const dist = this.haversineDistance(
-                    last.lat, last.lng, apt.lat, apt.lng
-                );
-                if (dist < minDist) {
-                    minDist = dist;
-                    nearestIndex = index;
-                }
-            });
-            sorted.push(remaining[nearestIndex]);
-            remaining.splice(nearestIndex, 1);
-        }
-        return sorted;
-    }
+  haversineDistance(lat1, lng1, lat2, lng2) {
+    const R = 6371;
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat/2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  }
 
-    sortRegionsByDistance(regions) {
-        const regionDistances = Object.entries(regions)
-            .filter(([_, data]) => data.appointments.length > 0)
-            .map(([name, data]) => ({
-                name,
-                distance: this.haversineDistance(
-                    this.constraints.homeBase.lat,
-                    this.constraints.homeBase.lng,
-                    data.center.lat,
-                    data.center.lng
-                )
-            }));
-        regionDistances.sort((a, b) => a.distance - b.distance);
-        return regionDistances.map(r => r.name);
-    }
+  initializeWeek(weekStart) {
+    const names = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag'];
+    const startDate = new Date(weekStart);
+    return names.map((name, idx) => {
+      const d = new Date(startDate); d.setDate(startDate.getDate() + idx);
+      return {
+        day: name,
+        date: d.toISOString().split('T')[0],
+        appointments: [],
+        travelSegments: [],
+        workTime: 0,
+        travelTime: 0,
+        totalHours: 0,
+        overnight: null
+      };
+    });
+  }
 
-    scheduleFixedAppointments(week, fixedAppointments) {
-        fixedAppointments.forEach(apt => {
-            const dayIndex = week.findIndex(d => d.date === apt.fixed_date);
-            if (dayIndex >= 0) {
-                week[dayIndex].appointments.push({
-                    ...apt,
-                    startTime: apt.fixed_time,
-                    endTime: this.addHours(apt.fixed_time, this.constraints.appointmentDuration)
-                });
-            }
-        });
-    }
+  formatWeekResult(week, weekStart) {
+    const totalAppointments = week.reduce((s, d) => s + d.appointments.length, 0);
+    const totalWork = week.reduce((s, d) => s + (d.workTime || 0), 0);
+    const totalTravel = week.reduce((s, d) => s + (d.travelTime || 0), 0);
+    const total = Math.round((totalWork + totalTravel) * 10) / 10;
+    const overnightCount = week.filter(d => d.overnight).length;
 
-    initializeWeek(weekStart) {
-        const weekDays = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag'];
-        const startDate = new Date(weekStart);
-        return weekDays.map((day, index) => {
-            const date = new Date(startDate);
-            date.setDate(startDate.getDate() + index);
-            return {
-                day,
-                date: date.toISOString().split('T')[0],
-                appointments: [],
-                travelSegments: [],
-                workTime: 0,
-                travelTime: 0,
-                overnight: null,
-                requiresPreviousDayOvernight: null
-            };
-        });
-    }
-
-    formatTime(hours) {
-        const h = Math.floor(hours);
-        const m = Math.round((hours - h) * 60);
-        return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
-    }
-
-    timeToHours(timeStr) {
-        const [h, m] = timeStr.split(':').map(Number);
-        return h + (m || 0) / 60;
-    }
-
-    addHours(timeStr, hours) {
-        return this.formatTime(this.timeToHours(timeStr) + hours);
-    }
-
-    getCityName(address) {
-        if (!address || typeof address !== 'string') {
-            return 'Unbekannt';
-        }
-        const match = address.match(/\d{5}\s+([^,]+)/);
-        return match ? match[1].trim() : address.substring(0, 20) + '...';
-    }
-
-    async getDistanceFromDB(from, to) {
-        return new Promise((resolve) => {
-            this.db.get(
-                `SELECT distance, duration FROM distance_cache 
-                 WHERE origin_lat = ? AND origin_lng = ? 
-                 AND dest_lat = ? AND dest_lng = ?
-                 AND cached_at > datetime('now', '-30 days')`,
-                [from.lat, from.lng, to.lat, to.lng],
-                (err, row) => {
-                    if (err || !row) {
-                        resolve(null);
-                    } else {
-                        resolve({
-                            distance: row.distance,
-                            duration: row.duration,
-                            cached: true
-                        });
-                    }
-                }
-            );
-        });
-    }
-
-    async saveDistanceToDB(from, to, result) {
-        this.db.run(
-            `INSERT OR REPLACE INTO distance_cache 
-             (origin_lat, origin_lng, dest_lat, dest_lng, distance, duration, cached_at)
-             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-            [from.lat, from.lng, to.lat, to.lng, result.distance, result.duration],
-            (err) => {
-                if (err) console.error('Cache-Speicherfehler:', err);
-            }
-        );
-    }
-
-    async findSimilarRoute(from, to) {
-        return new Promise((resolve) => {
-            this.db.get(
-                `SELECT distance, duration FROM distance_cache 
-                 WHERE ABS(origin_lat - ?) < 0.02 AND ABS(origin_lng - ?) < 0.02
-                 AND ABS(dest_lat - ?) < 0.02 AND ABS(dest_lng - ?) < 0.02
-                 AND cached_at > datetime('now', '-30 days')
-                 LIMIT 1`,
-                [from.lat, from.lng, to.lat, to.lng],
-                (err, row) => {
-                    if (err || !row) {
-                        resolve(null);
-                    } else {
-                        resolve({
-                            distance: row.distance,
-                            duration: row.duration
-                        });
-                    }
-                }
-            );
-        });
-    }
-
-    formatWeekResult(week, weekStart) {
-        const totalAppointments = week.reduce((sum, day) => sum + day.appointments.length, 0);
-        const totalWorkHours = week.reduce((sum, day) => sum + day.workTime, 0);
-        const totalTravelHours = week.reduce((sum, day) => sum + day.travelTime, 0);
-        const overnightStays = week.filter(day => day.overnight).length;
-        return {
-            weekStart,
-            days: week,
-            totalHours: Math.round((totalWorkHours + totalTravelHours) * 10) / 10,
-            optimizations: [
-                `${totalAppointments} Termine intelligent geplant`,
-                `Nur ${this.apiCallsCount} API Calls (Ersparnis: ~${Math.round((3000-this.apiCallsCount)/3000*100)}%)`,
-                `Geschätzte Kosten: ${(this.apiCallsCount * 0.01).toFixed(2)}€ statt ${(totalAppointments * totalAppointments * 0.01).toFixed(2)}€`,
-                overnightStays > 0 ? `${overnightStays} Übernachtungen geplant` : 'Keine Übernachtungen nötig',
-                'Echte Fahrzeiten mit regionaler Optimierung'
-            ],
-            stats: {
-                totalAppointments,
-                confirmedAppointments: week.reduce((sum, day) => 
-                    sum + day.appointments.filter(a => a.status === 'bestätigt').length, 0),
-                proposalAppointments: week.reduce((sum, day) => 
-                    sum + day.appointments.filter(a => a.status === 'vorschlag').length, 0),
-                totalTravelTime: Math.round(totalTravelHours * 10) / 10,
-                workDays: week.filter(day => day.appointments.length > 0).length,
-                overnightStays: overnightStays,
-                apiCalls: this.apiCallsCount,
-                estimatedCost: (this.apiCallsCount * 0.01).toFixed(2)
-            },
-            generatedAt: new Date().toISOString()
-        };
-    }
+    return {
+      weekStart,
+      days: week,
+      totalHours: total,
+      optimizations: [
+        `${totalAppointments} Termine geplant`,
+        `${overnightCount} Übernachtungen`,
+        `API-Aufrufe: ${this.apiCallsCount}`
+      ],
+      stats: {
+        totalAppointments,
+        totalTravelTime: Math.round(totalTravel * 10) / 10,
+        workDays: week.filter(d => d.appointments.length > 0).length,
+        overnightStays: overnightCount,
+        apiCalls: this.apiCallsCount
+      },
+      generatedAt: new Date().toISOString()
+    };
+  }
 }
 
 module.exports = IntelligentRoutePlanner;
