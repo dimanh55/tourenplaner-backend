@@ -217,6 +217,12 @@ class IntelligentRoutePlanner {
       const latestEnd = to - travelOutGuess;
 
       if (earliestStart + this.constraints.appointmentDuration <= latestEnd) {
+        // WICHTIG: Vor Rückgabe prüfen, ob der Slot tatsächlich frei ist
+        const proposedEnd = earliestStart + this.constraints.appointmentDuration;
+        if (this.hasTimeConflict(day, earliestStart, proposedEnd)) {
+          continue; // Dieses Fenster ist doch belegt, nächstes versuchen
+        }
+        
         // echte Travel-Objekte berechnen
         const travelTo = last ? await this.getDistance(last, appointment) : null;
         const travelFrom = next ? await this.getDistance(appointment, next) : null;
@@ -280,6 +286,12 @@ class IntelligentRoutePlanner {
     const start = this.roundToHalfHourUp(startHours);
     const end = start + this.constraints.appointmentDuration;
     const block = { ...apt, startTime: this.hoursToTime(start), endTime: this.hoursToTime(end) };
+    
+    // Kollisionsprüfung: Verhindere doppelte Zeitslots
+    if (this.hasTimeConflict(day, start, end)) {
+      throw new Error(`Zeitkonflikt: Slot ${this.hoursToTime(start)}-${this.hoursToTime(end)} bereits belegt am ${day.date}`);
+    }
+    
     day.appointments.push(block);
     day.appointments.sort((a,b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime));
   }
@@ -584,6 +596,34 @@ class IntelligentRoutePlanner {
     const a = Math.sin(dLat/2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2) ** 2;
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     return R * c;
+  }
+
+  // -------------------------------------------------------------------
+  // Kollisionsprüfung für Zeitslots
+  // -------------------------------------------------------------------
+  hasTimeConflict(day, proposedStart, proposedEnd) {
+    // Prüfe Überschneidungen mit bestehenden Terminen
+    for (const existing of day.appointments || []) {
+      const existingStart = this.timeToHours(existing.startTime);
+      const existingEnd = this.timeToHours(existing.endTime);
+      
+      // Überschneidung prüfen: Start vor Ende des anderen UND Ende nach Start des anderen
+      if (proposedStart < existingEnd && proposedEnd > existingStart) {
+        return true;
+      }
+    }
+    
+    // Prüfe Überschneidungen mit Reisesegmenten
+    for (const travel of day.travelSegments || []) {
+      const travelStart = this.timeToHours(travel.startTime);
+      const travelEnd = this.timeToHours(travel.endTime);
+      
+      if (proposedStart < travelEnd && proposedEnd > travelStart) {
+        return true;
+      }
+    }
+    
+    return false;
   }
 
   initializeWeek(weekStart) {
