@@ -152,7 +152,16 @@ function initializeDatabase() {
         name TEXT NOT NULL,
         home_base TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+    )`, (err) => {
+        if (err) {
+            console.error('❌ Fehler beim Erstellen der drivers Tabelle:', err);
+            return;
+        }
+        console.log('✅ Drivers Tabelle erstellt/verifiziert');
+        
+        // Erst NACH Tabellenerstellung den Fahrer einfügen
+        insertDefaultDriver();
+    });
 
     // Create saved_routes table for persistent route storage
     db.run(`CREATE TABLE IF NOT EXISTS saved_routes (
@@ -225,15 +234,7 @@ function initializeDatabase() {
         }
     });
 
-    // Stelle sicher, dass IMMER ein Fahrer existiert
-    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
-            VALUES (1, 'Testimonial-Fahrer', 'Kurt-Schumacher-Straße 34, 30159 Hannover')`, (err) => {
-        if (err) {
-            console.error('❌ Fehler beim Einfügen des Fahrers:', err);
-        } else {
-            console.log('✅ Standard-Fahrer sichergestellt');
-        }
-    });
+    // insertDefaultDriver() wird jetzt aus dem drivers table callback aufgerufen
 
     // Insert sample data if tables are empty
     db.get("SELECT COUNT(*) as count FROM appointments", (err, row) => {
@@ -243,6 +244,18 @@ function initializeDatabase() {
     });
 
     console.log('✅ Database tables initialized');
+}
+
+// Separate Funktion für das Einfügen des Standard-Fahrers
+function insertDefaultDriver() {
+    db.run(`INSERT OR IGNORE INTO drivers (id, name, home_base) 
+            VALUES (1, 'Testimonial-Fahrer', 'Kurt-Schumacher-Straße 34, 30159 Hannover')`, (err) => {
+        if (err) {
+            console.error('❌ Fehler beim Einfügen des Fahrers:', err);
+        } else {
+            console.log('✅ Standard-Fahrer sichergestellt');
+        }
+    });
 }
 
 function insertSampleData() {
