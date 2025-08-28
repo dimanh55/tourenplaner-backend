@@ -143,8 +143,10 @@ class IntelligentRoutePlanner {
           if (remaining >= leg.duration) {
             this.placeTravel(day, 'travel', this.getCityName(last.address), this.getCityName(next.address),
                              leg, this.roundToHalfHourUp(now), this.roundToHalfHourUp(now) + leg.duration);
-            // Overnight am Ziel
-            day.overnight = this.makeOvernight(next, 'Arbeitszeitende erreicht');
+            // Overnight nur Mo-Do, niemals Freitag!
+            if (day.day !== 'Freitag') {
+              day.overnight = this.makeOvernight(next, 'Arbeitszeitende erreicht');
+            }
           }
           // Nächster Termin bleibt für Folgetage
           pending.unshift(next);
