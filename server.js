@@ -3671,19 +3671,35 @@ app.delete('/api/appointments/fixed/:id', validateSession, async (req, res) => {
 
 // Alternative Terminvorschläge für abgelehnte Termine
 app.post('/api/appointments/suggest-alternatives', validateSession, async (req, res) => {
-    const { appointmentId, weekStart, reason = 'customer_rejected' } = req.body;
+    const { 
+        appointmentId, 
+        weekStart, 
+        reason = 'customer_rejected',
+        customer,
+        address,
+        duration = 3,
+        nextWeeks = 2
+    } = req.body;
 
     if (!appointmentId) {
         return res.status(400).json({ error: 'appointmentId is required' });
     }
 
     try {
-        const alternatives = await findSmartAlternativeSlots(
+        console.log(`🔍 Suche Terminvorschläge für Termin ${appointmentId} über ${nextWeeks} Wochen`);
+        
+        // Erweiterte Suche über mehrere Wochen
+        const suggestions = await findExtendedAlternativeSlots({
             appointmentId,
-            weekStart || new Date().toISOString().split('T')[0]
-        );
+            startWeek: weekStart || new Date().toISOString().split('T')[0],
+            weeksAhead: nextWeeks,
+            duration,
+            customer,
+            address
+        });
 
-        if (reason === 'customer_rejected' && alternatives.alternatives?.length > 0) {
+        // Nur bei customer_rejected den Status aktualisieren
+        if (reason === 'customer_rejected' && suggestions.length > 0) {
             await new Promise((resolve, reject) => {
                 db.run(
                     `UPDATE appointments 
@@ -3693,7 +3709,7 @@ app.post('/api/appointments/suggest-alternatives', validateSession, async (req, 
                     [JSON.stringify({
                         reason: reason,
                         rejected_at: new Date().toISOString(),
-                        alternatives_found: alternatives.alternatives.length
+                        alternatives_found: suggestions.length
                     }), appointmentId],
                     err => err ? reject(err) : resolve()
                 );
@@ -3702,10 +3718,11 @@ app.post('/api/appointments/suggest-alternatives', validateSession, async (req, 
 
         res.json({
             success: true,
-            ...alternatives,
-            recommendation: alternatives.alternatives?.length > 0 ?
-                `${alternatives.alternatives.length} alternative Slots gefunden. Beste Option: ${alternatives.alternatives[0].day} ${alternatives.alternatives[0].startTime}` :
-                'Keine passenden Alternativen in dieser Woche. Empfehle Verschiebung in nächste Woche.'
+            suggestions: suggestions,
+            totalFound: suggestions.length,
+            recommendation: suggestions.length > 0 ?
+                `${suggestions.length} Terminvorschläge gefunden. Beste Option: ${suggestions[0].date} ${suggestions[0].startTime}` :
+                `Keine passenden Terminvorschläge in den nächsten ${nextWeeks} Wochen gefunden.`
         });
 
     } catch (error) {
@@ -4770,6 +4787,156 @@ app.use((err, req, res, next) => {
 app.use('*', (req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
+
+// ======================================================================
+// ERWEITERTE TERMINVORSCHLAG-FUNKTION (ÜBER MEHRERE WOCHEN)
+// ======================================================================
+async function findExtendedAlternativeSlots({ appointmentId, startWeek, weeksAhead, duration = 3, customer, address }) {
+    const suggestions = [];
+    
+    try {
+        console.log(`🗓️ Suche in ${weeksAhead} Wochen ab ${startWeek}`);
+        
+        for (let weekOffset = 0; weekOffset < weeksAhead; weekOffset++) {
+            const currentWeekStart = new Date(startWeek);
+            currentWeekStart.setDate(currentWeekStart.getDate() + (weekOffset * 7));
+            const currentWeekString = currentWeekStart.toISOString().split('T')[0];
+            
+            console.log(`📅 Prüfe Woche ${weekOffset + 1}: ${currentWeekString}`);
+            
+            // Hole fixe Termine für diese Woche
+            const weekEnd = new Date(currentWeekStart);
+            weekEnd.setDate(weekEnd.getDate() + 4); // Freitag
+            
+            const fixedAppointments = await new Promise((resolve, reject) => {
+                db.all(`
+                    SELECT id, customer, fixed_date, fixed_time, duration, address
+                    FROM appointments 
+                    WHERE is_fixed = 1 
+                    AND fixed_date >= ? 
+                    AND fixed_date <= ?
+                    AND id != ?
+                    ORDER BY fixed_date, fixed_time
+                `, [currentWeekString, weekEnd.toISOString().split('T')[0], appointmentId], 
+                (err, rows) => err ? reject(err) : resolve(rows));
+            });
+            
+            console.log(`📌 ${fixedAppointments.length} fixe Termine in Woche ${currentWeekString}`);
+            
+            // Prüfe jeden Werktag (Mo-Fr)
+            for (let dayOffset = 0; dayOffset < 5; dayOffset++) {
+                const currentDate = new Date(currentWeekStart);
+                currentDate.setDate(currentDate.getDate() + dayOffset);
+                const dateString = currentDate.toISOString().split('T')[0];
+                
+                // Fixe Termine an diesem Tag
+                const dayAppointments = fixedAppointments.filter(apt => apt.fixed_date === dateString);
+                
+                // Verfügbare Zeitslots finden (6:00 - 20:00)
+                const availableSlots = findAvailableTimeSlots(dayAppointments, duration);
+                
+                for (const slot of availableSlots) {
+                    const endTime = timeToHours(slot.startTime) + duration;
+                    
+                    suggestions.push({
+                        date: dateString,
+                        startTime: slot.startTime,
+                        endTime: hoursToTimeString(endTime),
+                        weekNumber: getWeekNumber(dateString),
+                        dayName: currentDate.toLocaleDateString('de-DE', { weekday: 'long' }),
+                        reason: slot.reason,
+                        conflicts: slot.nearbyAppointments || [],
+                        travelTime: null // Kann später berechnet werden
+                    });
+                }
+            }
+        }
+        
+        // Sortiere nach Datum und Zeit
+        suggestions.sort((a, b) => {
+            if (a.date !== b.date) return a.date.localeCompare(b.date);
+            return a.startTime.localeCompare(b.startTime);
+        });
+        
+        console.log(`✅ ${suggestions.length} Terminvorschläge gefunden`);
+        return suggestions.slice(0, 12); // Maximal 12 Vorschläge
+        
+    } catch (error) {
+        console.error('❌ Fehler bei erweiterter Terminsuche:', error);
+        return [];
+    }
+}
+
+// Hilfsfunktion: Finde verfügbare Zeitslots an einem Tag
+function findAvailableTimeSlots(dayAppointments, duration) {
+    const slots = [];
+    const workStart = 6; // 6:00 Uhr
+    const workEnd = 20;  // 20:00 Uhr
+    
+    // Sortiere Termine nach Startzeit
+    const sortedAppointments = dayAppointments
+        .map(apt => ({
+            start: timeToHours(apt.fixed_time),
+            end: timeToHours(apt.fixed_time) + (apt.duration || 3),
+            customer: apt.customer
+        }))
+        .sort((a, b) => a.start - b.start);
+    
+    let currentTime = workStart;
+    
+    // Vor dem ersten Termin
+    if (sortedAppointments.length === 0) {
+        // Ganzer Tag verfügbar
+        for (let hour = workStart; hour <= workEnd - duration; hour += 0.5) {
+            if (hour >= 17 && new Date().getDay() === 5) break; // Freitag nur bis 17:00
+            
+            slots.push({
+                startTime: hoursToTimeString(hour),
+                reason: 'Freier Zeitslot'
+            });
+        }
+    } else {
+        // Zwischen den Terminen
+        for (let i = 0; i < sortedAppointments.length; i++) {
+            const apt = sortedAppointments[i];
+            
+            // Slot vor diesem Termin
+            if (currentTime + duration <= apt.start) {
+                slots.push({
+                    startTime: hoursToTimeString(currentTime),
+                    reason: `Vor ${apt.customer} (${hoursToTimeString(apt.start)})`
+                });
+            }
+            
+            currentTime = Math.max(currentTime, apt.end);
+        }
+        
+        // Nach dem letzten Termin
+        if (currentTime + duration <= workEnd) {
+            slots.push({
+                startTime: hoursToTimeString(currentTime),
+                reason: `Nach ${sortedAppointments[sortedAppointments.length - 1].customer}`
+            });
+        }
+    }
+    
+    return slots;
+}
+
+// Hilfsfunktionen
+function getWeekNumber(dateString) {
+    const date = new Date(dateString);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
+    const week1 = new Date(date.getFullYear(), 0, 4);
+    return 1 + Math.round(((date - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+}
+
+function hoursToTimeString(hours) {
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+}
 
 // ======================================================================
 // TERMIN BESTÄTIGEN - KONVERTIERT GEPLANTEN TERMIN ZU FESTEM TERMIN
