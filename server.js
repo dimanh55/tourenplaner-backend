@@ -4829,13 +4829,35 @@ async function findExtendedAlternativeSlots({ appointmentId, startWeek, weeksAhe
                 currentDate.setDate(currentDate.getDate() + dayOffset);
                 const dateString = currentDate.toISOString().split('T')[0];
                 
+                // WICHTIG: Überspringe Tage in der Vergangenheit
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const checkDate = new Date(currentDate);
+                checkDate.setHours(0, 0, 0, 0);
+                
+                if (checkDate < today) {
+                    console.log(`⏰ Überspringe vergangenes Datum: ${dateString}`);
+                    continue;
+                }
+                
                 // Fixe Termine an diesem Tag
                 const dayAppointments = fixedAppointments.filter(apt => apt.fixed_date === dateString);
                 
-                // Verfügbare Zeitslots finden (6:00 - 20:00)
-                const availableSlots = findAvailableTimeSlots(dayAppointments, duration);
+                // Verfügbare Zeitslots finden (mit korrekten Arbeitszeiten)
+                const availableSlots = findAvailableTimeSlots(dayAppointments, duration, currentDate);
                 
                 for (const slot of availableSlots) {
+                    // ZUSÄTZLICHE VERGANGENHEITS-PRÜFUNG für heute
+                    if (checkDate.getTime() === today.getTime()) {
+                        const now = new Date();
+                        const slotDateTime = new Date(dateString + 'T' + slot.startTime + ':00');
+                        
+                        if (slotDateTime <= now) {
+                            console.log(`⏰ Überspringe vergangene Zeit: ${dateString} ${slot.startTime}`);
+                            continue;
+                        }
+                    }
+                    
                     const endTime = timeToHours(slot.startTime) + duration;
                     
                     suggestions.push({
@@ -4868,10 +4890,16 @@ async function findExtendedAlternativeSlots({ appointmentId, startWeek, weeksAhe
 }
 
 // Hilfsfunktion: Finde verfügbare Zeitslots an einem Tag
-function findAvailableTimeSlots(dayAppointments, duration) {
+function findAvailableTimeSlots(dayAppointments, duration, currentDate) {
     const slots = [];
     const workStart = 6; // 6:00 Uhr
-    const workEnd = 20;  // 20:00 Uhr
+    let workEnd = 20;    // 20:00 Uhr (Standard)
+    
+    // WICHTIG: Freitag nur bis 17:00 Uhr
+    if (currentDate && currentDate.getDay() === 5) { // 5 = Freitag
+        workEnd = 17;
+        console.log(`📅 Freitag erkannt: Arbeitszeit bis ${workEnd}:00 Uhr`);
+    }
     
     // Sortiere Termine nach Startzeit
     const sortedAppointments = dayAppointments
@@ -4886,10 +4914,8 @@ function findAvailableTimeSlots(dayAppointments, duration) {
     
     // Vor dem ersten Termin
     if (sortedAppointments.length === 0) {
-        // Ganzer Tag verfügbar
+        // Ganzer Tag verfügbar (mit korrekten Arbeitszeiten)
         for (let hour = workStart; hour <= workEnd - duration; hour += 0.5) {
-            if (hour >= 17 && new Date().getDay() === 5) break; // Freitag nur bis 17:00
-            
             slots.push({
                 startTime: hoursToTimeString(hour),
                 reason: 'Freier Zeitslot'
@@ -4900,8 +4926,8 @@ function findAvailableTimeSlots(dayAppointments, duration) {
         for (let i = 0; i < sortedAppointments.length; i++) {
             const apt = sortedAppointments[i];
             
-            // Slot vor diesem Termin
-            if (currentTime + duration <= apt.start) {
+            // Slot vor diesem Termin (nur wenn innerhalb der Arbeitszeiten)
+            if (currentTime + duration <= apt.start && currentTime + duration <= workEnd) {
                 slots.push({
                     startTime: hoursToTimeString(currentTime),
                     reason: `Vor ${apt.customer} (${hoursToTimeString(apt.start)})`
