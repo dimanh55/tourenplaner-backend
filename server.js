@@ -4772,6 +4772,108 @@ app.use('*', (req, res) => {
 });
 
 // ======================================================================
+// TERMIN BESTÄTIGEN - KONVERTIERT GEPLANTEN TERMIN ZU FESTEM TERMIN
+// ======================================================================
+app.patch('/api/appointments/:id/confirm', validateSession, async (req, res) => {
+    const { id } = req.params;
+    const { fixed_date, fixed_time } = req.body;
+
+    if (!fixed_date || !fixed_time) {
+        return res.status(400).json({ error: 'fixed_date und fixed_time sind erforderlich' });
+    }
+
+    try {
+        console.log(`📌 Bestätige Termin ${id} für ${fixed_date} ${fixed_time}`);
+
+        // Prüfe ob Termin existiert
+        const appointment = await new Promise((resolve, reject) => {
+            db.get("SELECT * FROM appointments WHERE id = ?", [id], (err, row) => {
+                if (err) reject(err); else resolve(row);
+            });
+        });
+
+        if (!appointment) {
+            return res.status(404).json({ error: 'Termin nicht gefunden' });
+        }
+
+        // Prüfe auf Konflikte mit anderen festen Terminen
+        const conflicts = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT id, customer, fixed_time, duration
+                FROM appointments 
+                WHERE is_fixed = 1 
+                AND fixed_date = ? 
+                AND id != ?
+            `, [fixed_date, id], (err, rows) => {
+                if (err) reject(err); else resolve(rows);
+            });
+        });
+
+        const newStart = timeToHours(fixed_time);
+        const newEnd = newStart + 3; // Standard-Dauer 3 Stunden
+
+        for (const conflict of conflicts) {
+            const conflictStart = timeToHours(conflict.fixed_time);
+            const conflictEnd = conflictStart + (conflict.duration || 3);
+
+            if ((newStart >= conflictStart && newStart < conflictEnd) ||
+                (newEnd > conflictStart && newEnd <= conflictEnd) ||
+                (newStart <= conflictStart && newEnd >= conflictEnd)) {
+                return res.status(409).json({
+                    error: 'Zeitkonflikt mit bestehendem Termin',
+                    conflict: {
+                        customer: conflict.customer,
+                        time: conflict.fixed_time
+                    }
+                });
+            }
+        }
+
+        // Aktualisiere Termin zu festem Termin
+        await new Promise((resolve, reject) => {
+            db.run(`
+                UPDATE appointments 
+                SET is_fixed = 1, 
+                    fixed_date = ?, 
+                    fixed_time = ?, 
+                    status = 'bestätigt',
+                    duration = COALESCE(duration, 3)
+                WHERE id = ?
+            `, [fixed_date, fixed_time, id], (err) => {
+                if (err) reject(err); else resolve();
+            });
+        });
+
+        console.log(`✅ Termin ${id} erfolgreich bestätigt für ${fixed_date} ${fixed_time}`);
+
+        res.json({
+            success: true,
+            message: 'Termin erfolgreich bestätigt',
+            appointment: {
+                id: id,
+                fixed_date: fixed_date,
+                fixed_time: fixed_time,
+                is_fixed: 1,
+                status: 'bestätigt'
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Fehler beim Bestätigen des Termins:', error);
+        res.status(500).json({
+            error: 'Fehler beim Bestätigen des Termins',
+            details: error.message
+        });
+    }
+});
+
+// Helper function to convert time string to hours
+function timeToHours(timeString) {
+    const [hours, minutes] = timeString.split(':').map(Number);
+    return hours + (minutes || 0) / 60;
+}
+
+// ======================================================================
 // SERVER START
 // ======================================================================
 
