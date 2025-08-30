@@ -18,13 +18,14 @@ class IntelligentRoutePlanner {
     this.apiCallsCount = 0;
 
     this.constraints = {
-      maxWorkHoursPerWeek: 100,   // Erhöht: 100h pro Woche (inkl. Fahrtzeit)
-      maxWorkHoursPerDay: 15,     // Erhöht: 15h pro Tag (inkl. Fahrtzeit) - bis 9h Fahrtzeit möglich
+      maxWorkHoursPerWeek: 40,    // ZURÜCK ZUM ORIGINAL: 40h pro Woche
+      maxWorkHoursPerDay: 10,     // ZURÜCK ZUM ORIGINAL: 10h pro Tag 
       workStartTime: 8.5,         // 08:30
       appointmentDuration: 3,     // 3h pro Dreh
       homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
       
       // EINFACHE PUFFER-REGEL - Nutze Google Maps Zeit + kleiner Puffer
+      maxSingleTravelHours: 9,    // NEU: Maximale Fahrtzeit zwischen zwei Orten
       overnightThresholdKm: 120   // Heimfahrt vermeiden, wenn >120 km
     };
   }
@@ -186,6 +187,11 @@ class IntelligentRoutePlanner {
       const first = pending.shift();
       if (first) {
         const toFirst = await this.getDistance(startLocation, first);
+        if (!toFirst) {
+          console.log(`🚫 ERSTER TERMIN UNERREICHBAR: ${first.customer} (>9h Fahrt)`);
+          pending.unshift(first); // Termin zurück in pending
+          break; // Stoppe Tagesplanung
+        }
         // Abfahrt nicht vor 08:30; runde auf :00/:30
         let departAt = Math.max(this.constraints.workStartTime, currentTime);
         departAt = this.roundToHalfHourUp(departAt);
@@ -210,6 +216,11 @@ class IntelligentRoutePlanner {
         });
         const next = pending.shift();
         const leg = await this.getDistance(last, next);
+        if (!leg) {
+          console.log(`🚫 TERMIN UNERREICHBAR: ${next.customer} (>9h Fahrt von ${last.customer})`);
+          pending.unshift(next); // Termin zurück in pending
+          break; // Stoppe weitere Termine für diesen Tag
+        }
 
         // Prüfe, ob noch Platz im Tag (Freitag: max bis 17:00)
         const now = this.timeToHours(day.appointments[day.appointments.length - 1].endTime);
@@ -323,6 +334,13 @@ class IntelligentRoutePlanner {
         // echte Travel-Objekte berechnen
         const travelTo = last ? await this.getDistance(last, appointment) : null;
         const travelFrom = next ? await this.getDistance(appointment, next) : null;
+        
+        // Prüfe auf zu lange Fahrten (>9h)
+        if ((travelTo === null && last) || (travelFrom === null && next)) {
+          console.log(`🚫 FIXER TERMIN UNERREICHBAR: ${appointment.customer} (>9h Fahrt)`);
+          continue; // Versuche nächstes Zeitfenster
+        }
+        
         return { start: earliestStart, travelTo, travelFrom };
       }
     }
@@ -337,6 +355,12 @@ class IntelligentRoutePlanner {
     if (!last) return;
 
     const toHome = await this.getDistance(last, this.constraints.homeBase);
+    if (!toHome) {
+      console.log(`🚫 HEIMFAHRT UNMÖGLICH: >9h von ${last.customer} nach Hannover`);
+      // Erzwinge Übernachtung, da Heimfahrt nicht möglich
+      day.overnight = this.makeOvernight(last, 'Heimfahrt >9h unmöglich');
+      return;
+    }
     const leaveAt = this.roundToHalfHourUp(this.timeToHours(last.endTime));
     const arrive = leaveAt + toHome.duration;
 
@@ -350,6 +374,10 @@ class IntelligentRoutePlanner {
         const prevLast = day.appointments[day.appointments.length - 1];
         if (!prevLast) break;
         const tryHome = await this.getDistance(prevLast, this.constraints.homeBase);
+        if (!tryHome) {
+          console.log(`🚫 HEIMFAHRT UNMÖGLICH: >9h von ${prevLast.customer} nach Hannover`);
+          continue; // Entferne weitere Termine
+        }
         const tLeave = this.roundToHalfHourUp(this.timeToHours(prevLast.endTime));
         const tArr = tLeave + tryHome.duration;
         if (tArr <= latestHome) {
@@ -534,6 +562,10 @@ class IntelligentRoutePlanner {
         if (aptIdx === 0) {
           try {
             const travelToFirst = await this.getDistance(previousLocation, appointment);
+            if (!travelToFirst) {
+              console.log(`🚫 FIXER TERMIN UNERREICHBAR: ${appointment.customer} (>9h Fahrt zum ersten Termin)`);
+              return null; // Fixer Termin kann nicht geplant werden
+            }
             
             // Berechne Abfahrtszeit (Ankunft - Reisezeit)
             const arrivalTime = appointmentStartTime;
@@ -565,6 +597,10 @@ class IntelligentRoutePlanner {
           const previousAppointment = day.appointments[aptIdx - 1];
           try {
             const travelBetween = await this.getDistance(previousAppointment, appointment);
+            if (!travelBetween) {
+              console.log(`🚫 FIXER TERMIN UNERREICHBAR: ${appointment.customer} (>9h Fahrt von ${previousAppointment.customer})`);
+              return null; // Fixer Termin kann nicht geplant werden
+            }
             
             const departureTime = this.timeToHours(previousAppointment.endTime);
             const arrivalTime = appointmentStartTime;
@@ -742,6 +778,12 @@ class IntelligentRoutePlanner {
         // EINFACHE PUFFER-REGEL: Google Maps Zeit + kleiner Puffer
         const finalDuration = googleHours + this.calculateSimpleTravelPadding(googleHours);
         
+        // PRÜFE MAXIMALE EINZELFAHRTZEIT
+        if (finalDuration > this.constraints.maxSingleTravelHours) {
+          console.log(`🚫 FAHRT ZU LANG: ${dist.toFixed(1)}km würde ${finalDuration.toFixed(2)}h dauern (max ${this.constraints.maxSingleTravelHours}h)`);
+          return null; // Fahrt zu lang, nicht durchführbar
+        }
+        
         console.log(`🗺️ GOOGLE MAPS: ${dist.toFixed(1)}km → ${googleHours.toFixed(2)}h + ${(finalDuration-googleHours).toFixed(2)}h Puffer = ${finalDuration.toFixed(2)}h`);
         
         const result = { 
@@ -760,9 +802,17 @@ class IntelligentRoutePlanner {
 
     // EINFACHE FALLBACK-BERECHNUNG: Google Maps Schätzung + Puffer
     const estimatedHours = directKm * 1.2 / 75; // 1.2x Straßenfaktor, 75km/h Schnitt
+    const fallbackDuration = estimatedHours + this.calculateSimpleTravelPadding(estimatedHours);
+    
+    // PRÜFE MAXIMALE EINZELFAHRTZEIT
+    if (fallbackDuration > this.constraints.maxSingleTravelHours) {
+      console.log(`🚫 FALLBACK FAHRT ZU LANG: ${directKm.toFixed(1)}km würde ${fallbackDuration.toFixed(2)}h dauern (max ${this.constraints.maxSingleTravelHours}h)`);
+      return null; // Fahrt zu lang, nicht durchführbar
+    }
+    
     const fallback = { 
       distance: directKm * 1.2, 
-      duration: estimatedHours + this.calculateSimpleTravelPadding(estimatedHours), 
+      duration: fallbackDuration, 
       approximated: true, 
       fallback: true
     };
