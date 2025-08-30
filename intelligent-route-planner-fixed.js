@@ -445,8 +445,21 @@ class IntelligentRoutePlanner {
   // -------------------------------------------------------------------
   async scheduleFixedAppointments(week, fixedAppointments) {
     for (const apt of fixedAppointments) {
-      const idx = week.findIndex(d => d.date === apt.fixed_date);
-      if (idx < 0) continue;
+      // Konvertiere deutsches Datumsformat zu ISO-Format
+      let isoDate = apt.fixed_date;
+      if (apt.fixed_date && apt.fixed_date.includes('.')) {
+        // Deutsches Format: "01.09.2025" -> ISO: "2025-09-01"
+        const parts = apt.fixed_date.split('.');
+        if (parts.length === 3) {
+          isoDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+        }
+      }
+      
+      const idx = week.findIndex(d => d.date === isoDate);
+      if (idx < 0) {
+        console.log(`⚠️ Datum nicht gefunden: fixed_date="${apt.fixed_date}" -> isoDate="${isoDate}"`);
+        continue;
+      }
       
       // WICHTIG: Überspringe fixe Termine in der Vergangenheit
       const day = week[idx];
