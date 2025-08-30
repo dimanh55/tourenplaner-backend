@@ -32,9 +32,12 @@ class IntelligentRoutePlanner {
   // Öffentliche Hauptfunktion
   // -------------------------------------------------------------------
   async optimizeWeek(appointments, weekStart, driverId) {
+    console.log(`🚀 OPTIMIERE WOCHE: ${weekStart}`);
     const geoAppointments = await this.ensureGeocoding(appointments);
     const { regions, fixedAppointments } = this.clusterByRegion(geoAppointments);
     const week = this.initializeWeek(weekStart);
+
+    console.log(`📅 WOCHE INITIALISIERT:`, week.map(d => `${d.day} (${d.date}) - ${d.isPastDay ? 'VERGANGENHEIT' : 'OK'}`));
 
     // Feste Termine unverrückbar einplanen
     this.scheduleFixedAppointments(week, fixedAppointments);
@@ -46,6 +49,13 @@ class IntelligentRoutePlanner {
 
     for (let dayIdx = 0; dayIdx < 5; dayIdx++) {
       const day = week[dayIdx];
+      
+      // WICHTIG: Überspringe vergangene Tage komplett
+      if (day.isPastDay) {
+        console.log(`⏰ ÜBERSPRINGE vergangenen Tag: ${day.day} (${day.date})`);
+        continue;
+      }
+      
       const regionName = regionOrder[dayIdx % regionOrder.length] || 'Mitte';
       const bucket = regions[regionName]?.appointments || [];
       if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
@@ -132,11 +142,24 @@ class IntelligentRoutePlanner {
         const next = pending.shift();
         const leg = await this.getDistance(last, next);
 
-        // Prüfe, ob noch Platz im 10h-Tag
+        // Prüfe, ob noch Platz im Tag (Freitag: max bis 17:00)
         const now = this.timeToHours(day.appointments[day.appointments.length - 1].endTime);
         const nextStartCandidate = this.roundToHalfHourUp(now + leg.duration);
         const workedSoFar = (this.computeWorkHours(day) + this.computeTravelHours(day));
-        const remaining = this.constraints.maxWorkHoursPerDay - workedSoFar;
+        
+        // FREITAG-REGEL: Berechne maximale Arbeitszeit basierend auf 17:00 Cutoff
+        const maxWorkHours = day.day === 'Freitag' ? 
+          (17 - this.constraints.workStartTime) : 
+          this.constraints.maxWorkHoursPerDay;
+        const remaining = maxWorkHours - workedSoFar;
+        
+        // ZUSÄTZLICHER FREITAG-CHECK: Termin darf nicht nach 17:00 enden
+        const appointmentEnd = nextStartCandidate + this.constraints.appointmentDuration;
+        if (day.day === 'Freitag' && appointmentEnd > 17) {
+          console.log(`⏰ FREITAG-STOP: Termin würde bis ${this.hoursToTime(appointmentEnd)} gehen (nach 17:00)`);
+          pending.unshift(next);
+          break;
+        }
 
         if (remaining < (leg.duration + this.constraints.appointmentDuration)) {
           // Fahrt ggf. noch durchführen, um für Overnight zu positionieren
@@ -374,6 +397,13 @@ class IntelligentRoutePlanner {
     for (const apt of fixedAppointments) {
       const idx = week.findIndex(d => d.date === apt.fixed_date);
       if (idx < 0) continue;
+      
+      // WICHTIG: Überspringe fixe Termine in der Vergangenheit
+      const day = week[idx];
+      if (day.isPastDay) {
+        console.log(`⏰ ÜBERSPRINGE fixen Termin in der Vergangenheit: ${apt.customer_company} am ${day.date}`);
+        continue;
+      }
 
       const start = apt.fixed_time || '08:30';
       const startH = this.roundToHalfHourUp(this.timeToHours(start));
@@ -631,17 +661,33 @@ class IntelligentRoutePlanner {
   initializeWeek(weekStart) {
     const names = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag'];
     const startDate = new Date(weekStart);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
     return names.map((name, idx) => {
-      const d = new Date(startDate); d.setDate(startDate.getDate() + idx);
+      const d = new Date(startDate); 
+      d.setDate(startDate.getDate() + idx);
+      const dateString = d.toISOString().split('T')[0];
+      const dayDate = new Date(dateString);
+      dayDate.setHours(0, 0, 0, 0);
+      
+      // WICHTIG: Markiere vergangene Tage
+      const isPastDay = dayDate < today;
+      
+      if (isPastDay) {
+        console.log(`⏰ WARNUNG: Tag ${name} (${dateString}) liegt in der Vergangenheit!`);
+      }
+      
       return {
         day: name,
-        date: d.toISOString().split('T')[0],
+        date: dateString,
         appointments: [],
         travelSegments: [],
         workTime: 0,
         travelTime: 0,
         totalHours: 0,
-        overnight: null
+        overnight: null,
+        isPastDay: isPastDay // Neue Eigenschaft für Vergangenheitsprüfung
       };
     });
   }
