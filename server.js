@@ -467,6 +467,20 @@ app.post('/api/routes/optimize', validateSession, async (req, res) => {
         return res.status(400).json({ error: 'weekStart is required' });
     }
 
+    // SICHERHEITS-CHECK: Verhindere Planung in der Vergangenheit
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const weekStartDate = new Date(weekStart);
+    weekStartDate.setHours(0, 0, 0, 0);
+    
+    if (weekStartDate < today) {
+        console.log(`⚠️  Vergangenheitsplanung verhindert für Woche ${weekStart}`);
+        return res.status(400).json({ 
+            error: 'Routenplanung in der Vergangenheit nicht möglich', 
+            message: `Woche ${weekStart} liegt in der Vergangenheit`
+        });
+    }
+
     console.log('🚀 KORRIGIERTE Routenoptimierung für Woche:', weekStart);
 
     try {
@@ -586,6 +600,29 @@ app.post('/api/routes/optimize-all', validateSession, async (req, res) => {
 
     if (!startWeek) {
         return res.status(400).json({ error: 'startWeek is required' });
+    }
+
+    // SICHERHEITS-CHECK: Verhindere Planung in der Vergangenheit
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startWeekDate = new Date(startWeek);
+    startWeekDate.setHours(0, 0, 0, 0);
+    
+    if (startWeekDate < today) {
+        // Berechne nächsten Montag
+        const nextMonday = new Date(today);
+        const dayOfWeek = today.getDay();
+        const daysUntilMonday = dayOfWeek === 0 ? 1 : (8 - dayOfWeek); // Sonntag: +1, sonst: 8-dayOfWeek
+        nextMonday.setDate(today.getDate() + daysUntilMonday);
+        
+        const correctedWeek = nextMonday.toISOString().split('T')[0];
+        console.log(`⚠️  Vergangenheitsplanung verhindert! Korrigiere ${startWeek} → ${correctedWeek}`);
+        
+        return res.status(400).json({ 
+            error: 'Routenplanung in der Vergangenheit nicht möglich', 
+            correctedStartWeek: correctedWeek,
+            message: `Bitte verwende ${correctedWeek} (nächster Montag) als Startdatum`
+        });
     }
 
     console.log('🌍 GESAMT-ROUTENOPTIMIERUNG: Plane ALLE verfügbaren Termine...');
