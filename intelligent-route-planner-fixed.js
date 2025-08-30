@@ -242,6 +242,7 @@ class IntelligentRoutePlanner {
           break;
         }
 
+        console.log(`🔍 LEG OBJECT DEBUG: leg.duration=${leg.duration}h, leg.realtime=${leg.realtime}, leg.fallback=${leg.fallback}`);
         console.log(`🔄 TERMIN-CHECK: ${next.customer} - Benötigt: ${(leg.duration + this.constraints.appointmentDuration).toFixed(1)}h, Verfügbar: ${remaining.toFixed(1)}h`);
         
         if (remaining < (leg.duration + this.constraints.appointmentDuration)) {
@@ -746,11 +747,17 @@ class IntelligentRoutePlanner {
     const key = `${from.lat},${from.lng}-${to.lat},${to.lng}`;
     if (this.distanceCache.has(key)) return this.distanceCache.get(key);
 
-    // DB-Cache
+    // DB-Cache - aber nur echte Google Maps Daten verwenden!
     const dbCached = await this.getDistanceFromDB(from, to);
     if (dbCached) {
-      this.distanceCache.set(key, dbCached);
-      return dbCached;
+      // NEUE REGEL: Fallback-Daten aus dem Cache ignorieren, echte Google Maps API verwenden!
+      if (dbCached.fallback || !dbCached.realtime) {
+        console.log(`🗑️ IGNORIERE ALTE FALLBACK-DATEN: ${dbCached.distance?.toFixed(1)}km → ${dbCached.duration?.toFixed(2)}h (veraltet)`);
+      } else {
+        console.log(`💾 DB CACHE HIT: ${dbCached.distance?.toFixed(1)}km → ${dbCached.duration?.toFixed(2)}h (echte Google Maps Daten)`);
+        this.distanceCache.set(key, dbCached);
+        return dbCached;
+      }
     }
 
     // Fallback-Haversine
