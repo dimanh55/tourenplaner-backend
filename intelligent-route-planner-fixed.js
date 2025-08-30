@@ -42,7 +42,7 @@ class IntelligentRoutePlanner {
     console.log(`📅 WOCHE INITIALISIERT: ${pastDays} vergangene Tage von 5`);
 
     // Feste Termine unverrückbar einplanen
-    this.scheduleFixedAppointments(week, fixedAppointments);
+    await this.scheduleFixedAppointments(week, fixedAppointments);
 
     // Flexible Termine nach Regionen abarbeiten
     const regionOrder = this.sortRegionsByDistance(regions);
@@ -443,7 +443,7 @@ class IntelligentRoutePlanner {
   // -------------------------------------------------------------------
   // Fixe Termine platzieren (unverrückbar)
   // -------------------------------------------------------------------
-  scheduleFixedAppointments(week, fixedAppointments) {
+  async scheduleFixedAppointments(week, fixedAppointments) {
     for (const apt of fixedAppointments) {
       const idx = week.findIndex(d => d.date === apt.fixed_date);
       if (idx < 0) continue;
@@ -465,8 +465,89 @@ class IntelligentRoutePlanner {
         endTime: this.hoursToTime(endH)
       });
     }
+    
     // Chronologisch sortieren
     week.forEach(d => d.appointments.sort((a,b) => this.timeToHours(a.startTime) - this.timeToHours(b.startTime)));
+    
+    // NEUE FUNKTION: Fahrten zwischen fixen Terminen berechnen
+    await this.addTravelBetweenFixedAppointments(week);
+  }
+
+  async addTravelBetweenFixedAppointments(week) {
+    let previousLocation = this.constraints.homeBase; // Start von Hannover
+    let previousEndTime = null;
+    
+    for (let dayIdx = 0; dayIdx < week.length; dayIdx++) {
+      const day = week[dayIdx];
+      
+      if (day.isPastDay || day.appointments.length === 0) {
+        continue;
+      }
+      
+      // Für jeden fixen Termin des Tages
+      for (let aptIdx = 0; aptIdx < day.appointments.length; aptIdx++) {
+        const appointment = day.appointments[aptIdx];
+        const appointmentStartTime = this.timeToHours(appointment.startTime);
+        
+        // Fahrt zum ersten Termin des Tages (vom Home Base oder vorherigen Tag)
+        if (aptIdx === 0) {
+          try {
+            const travelToFirst = await this.getDistance(previousLocation, appointment);
+            
+            // Berechne Abfahrtszeit (Ankunft - Reisezeit)
+            const arrivalTime = appointmentStartTime;
+            const departureTime = Math.max(
+              this.constraints.workStartTime, 
+              arrivalTime - travelToFirst.duration
+            );
+            
+            const fromLabel = previousLocation === this.constraints.homeBase ? 
+              'Hannover' : this.getCityName(previousLocation.address || 'Unbekannt');
+            
+            day.travelSegments = day.travelSegments || [];
+            day.travelSegments.push({
+              type: dayIdx === 0 ? 'departure' : 'departure_from_hotel',
+              from: fromLabel,
+              to: this.getCityName(appointment.address),
+              distance: Math.round(travelToFirst.distance || 0),
+              duration: travelToFirst.duration,
+              startTime: this.hoursToTime(this.roundToHalfHourUp(departureTime)),
+              endTime: this.hoursToTime(this.roundToHalfHourUp(arrivalTime))
+            });
+          } catch (error) {
+            console.log(`⚠️ Fehler bei Fahrt zu ${appointment.customer_company}:`, error.message);
+          }
+        }
+        
+        // Fahrt zwischen fixen Terminen am selben Tag
+        if (aptIdx > 0) {
+          const previousAppointment = day.appointments[aptIdx - 1];
+          try {
+            const travelBetween = await this.getDistance(previousAppointment, appointment);
+            
+            const departureTime = this.timeToHours(previousAppointment.endTime);
+            const arrivalTime = appointmentStartTime;
+            
+            day.travelSegments = day.travelSegments || [];
+            day.travelSegments.push({
+              type: 'travel',
+              from: this.getCityName(previousAppointment.address),
+              to: this.getCityName(appointment.address),
+              distance: Math.round(travelBetween.distance || 0),
+              duration: travelBetween.duration,
+              startTime: this.hoursToTime(this.roundToHalfHourUp(departureTime)),
+              endTime: this.hoursToTime(this.roundToHalfHourUp(arrivalTime))
+            });
+          } catch (error) {
+            console.log(`⚠️ Fehler bei Fahrt zwischen fixen Terminen:`, error.message);
+          }
+        }
+        
+        // Update für nächsten Tag
+        previousLocation = appointment;
+        previousEndTime = this.timeToHours(appointment.endTime);
+      }
+    }
   }
 
   // -------------------------------------------------------------------
