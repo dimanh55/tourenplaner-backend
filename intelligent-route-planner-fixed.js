@@ -756,6 +756,9 @@ class IntelligentRoutePlanner {
     // Fallback-Haversine
     const directKm = this.haversineDistance(from.lat, from.lng, to.lat, to.lng);
 
+    console.log(`🔍 GOOGLE MAPS API ANFRAGE: Von ${from.lat},${from.lng} nach ${to.lat},${to.lng}`);
+    console.log(`🔑 API KEY: ${this.apiKey ? 'VORHANDEN' : 'FEHLT!'}`);
+    
     try {
       const url = 'https://maps.googleapis.com/maps/api/distancematrix/json';
       const params = {
@@ -767,8 +770,16 @@ class IntelligentRoutePlanner {
         departure_time: 'now',
         traffic_model: 'best_guess'
       };
+      
+      console.log(`🌐 GOOGLE MAPS URL: ${url}?${new URLSearchParams(params).toString().substring(0, 100)}...`);
+      
       const resp = await axios.get(url, { params, timeout: 4000 });
       this.apiCallsCount++;
+      
+      console.log(`📡 GOOGLE MAPS RESPONSE STATUS: ${resp.data?.status}, ROWS: ${resp.data?.rows?.length}`);
+      if (resp.data?.rows?.[0]?.elements?.[0]) {
+        console.log(`📍 ELEMENT STATUS: ${resp.data.rows[0].elements[0].status}`);
+      }
 
       const el = resp.data?.rows?.[0]?.elements?.[0];
       if (el && el.status === 'OK') {
@@ -798,9 +809,14 @@ class IntelligentRoutePlanner {
         return result;
       }
     } catch (e) {
-      // still fall back
+      console.log(`❌ GOOGLE MAPS API FEHLER: ${e.message}`);
+      if (e.response) {
+        console.log(`🔥 HTTP STATUS: ${e.response.status}, DATA: ${JSON.stringify(e.response.data)}`);
+      }
+      console.log(`⚠️ FALLBACK ZU HAVERSINE-SCHÄTZUNG`);
     }
 
+    console.log(`🔄 VERWENDE FALLBACK: ${directKm.toFixed(1)}km Luftlinie`);
     // EINFACHE FALLBACK-BERECHNUNG: Google Maps Schätzung + Puffer
     const estimatedHours = directKm * 1.2 / 75; // 1.2x Straßenfaktor, 75km/h Schnitt
     const fallbackDuration = estimatedHours + this.calculateSimpleTravelPadding(estimatedHours);
