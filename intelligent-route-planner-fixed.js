@@ -58,12 +58,60 @@ class IntelligentRoutePlanner {
         continue;
       }
       
-      const regionName = regionOrder[dayIdx % regionOrder.length] || 'Mitte';
-      const bucket = regions[regionName]?.appointments || [];
       if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
 
+      // NEUE LOGIK: Region basierend auf fixen Terminen des Tages bestimmen
+      let regionName = 'Mitte'; // Default
+      let bucket = [];
+      
+      if (day.appointments.length > 0) {
+        // Tag hat fixe Termine - finde beste Region basierend auf fixen Terminen
+        const fixedAppointment = day.appointments[0]; // Nimm ersten fixen Termin als Referenz
+        let bestRegion = 'Mitte';
+        let bestDistance = Infinity;
+        
+        // Finde die Region, die am nächsten zum fixen Termin liegt
+        for (const [rName, rData] of Object.entries(regions)) {
+          const distance = this.haversineDistance(
+            fixedAppointment.lat, fixedAppointment.lng,
+            rData.center.lat, rData.center.lng
+          );
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestRegion = rName;
+          }
+        }
+        regionName = bestRegion;
+        bucket = regions[regionName]?.appointments || [];
+        console.log(`📍 Tag ${day.day}: Verwende Region ${regionName} für fixe Termine in ${fixedAppointment.address}`);
+      } else {
+        // Tag ohne fixe Termine - verwende rotierende Region oder näher zu Previous Overnight
+        if (previousOvernight) {
+          // Finde Region nächst zu Overnight-Position
+          let bestRegion = 'Mitte';
+          let bestDistance = Infinity;
+          for (const [rName, rData] of Object.entries(regions)) {
+            const distance = this.haversineDistance(
+              previousOvernight.location.lat, previousOvernight.location.lng,
+              rData.center.lat, rData.center.lng
+            );
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestRegion = rName;
+            }
+          }
+          regionName = bestRegion;
+          console.log(`🏨 Tag ${day.day}: Verwende Region ${regionName} basierend auf Übernachtung in ${previousOvernight.city}`);
+        } else {
+          // Fallback: Rotierende Regionswahl
+          regionName = regionOrder[dayIdx % regionOrder.length] || 'Mitte';
+          console.log(`🔄 Tag ${day.day}: Verwende rotierende Region ${regionName}`);
+        }
+        bucket = regions[regionName]?.appointments || [];
+      }
+
       // Flexible Slots des Tages ermitteln (Lücken neben FIX-Terminen)
-      const flexibleCandidates = this.pickFlexibleForDay(day.date, bucket, 6); // bis zu 6 flexible Kandidaten in die Tagesplanung geben
+      const flexibleCandidates = this.pickFlexibleForDay(day.date, bucket, 6, day.appointments);
       const remaining = await this.planDayEfficiently(day, flexibleCandidates, regionName, previousOvernight);
 
       // Übrig gebliebenes wieder an die Region zurückhängen
@@ -457,14 +505,35 @@ class IntelligentRoutePlanner {
     return arr.map(x => x.name);
   }
 
-  pickFlexibleForDay(date, list, maxCount) {
-    // Nimm die ersten maxCount Elemente, bevorzugt bestätigte und mit größerem pipeline_days
-    const sorted = [...list].sort((a,b) => {
-      if ((a.status === 'bestätigt') !== (b.status === 'bestätigt'))
-        return a.status === 'bestätigt' ? -1 : 1;
-      return (b.pipeline_days || 0) - (a.pipeline_days || 0);
-    });
+  pickFlexibleForDay(date, list, maxCount, fixedAppointments = []) {
+    if (list.length === 0) return [];
+    
+    // Wenn fixe Termine vorhanden, sortiere nach Nähe zum ersten fixen Termin
+    let sorted;
+    if (fixedAppointments.length > 0) {
+      const referencePoint = fixedAppointments[0]; // Nimm ersten fixen Termin als Referenz
+      sorted = [...list].sort((a, b) => {
+        // Erst nach Status (bestätigt bevorzugt)
+        if ((a.status === 'bestätigt') !== (b.status === 'bestätigt'))
+          return a.status === 'bestätigt' ? -1 : 1;
+        
+        // Dann nach geografischer Nähe zum fixen Termin
+        const distA = this.haversineDistance(a.lat, a.lng, referencePoint.lat, referencePoint.lng);
+        const distB = this.haversineDistance(b.lat, b.lng, referencePoint.lat, referencePoint.lng);
+        
+        return distA - distB; // Näherer Termin zuerst
+      });
+    } else {
+      // Ohne fixe Termine: Standard-Sortierung
+      sorted = [...list].sort((a,b) => {
+        if ((a.status === 'bestätigt') !== (b.status === 'bestätigt'))
+          return a.status === 'bestätigt' ? -1 : 1;
+        return (b.pipeline_days || 0) - (a.pipeline_days || 0);
+      });
+    }
+    
     const take = sorted.splice(0, maxCount);
+    
     // Entferne die genommenen aus der Originalliste
     for (const t of take) {
       const idx = list.indexOf(t);
