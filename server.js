@@ -2212,18 +2212,32 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
 
                     console.log(`📅 Parsing date: "${dateTimeStr}"`);
 
-                    // Format 1: DD.MM.YYYY HH:MM oder DD/MM/YYYY HH:MM
-                    if (dateTimeStr.match(/^\d{1,2}[\.\/]\d{1,2}[\.\/]\d{4}\s+\d{1,2}:\d{2}/)) {
+                    // Format 1: DD.MM.YYYY HH:MM:SS oder DD.MM.YYYY HH:MM oder DD/MM/YYYY HH:MM:SS oder DD/MM/YYYY HH:MM
+                    if (dateTimeStr.match(/^\d{1,2}[\.\/]\d{1,2}[\.\/]\d{4}\s+\d{1,2}:\d{2}(:\d{2})?/)) {
                         const [datePart, timePart] = dateTimeStr.split(/\s+/);
                         const [day, month, year] = datePart.split(/[\.\/]/);
-                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${timePart}:00`);
+                        
+                        // Verarbeite Zeit - mit oder ohne Sekunden
+                        let isoTimeString;
+                        if (timePart.includes(':') && timePart.split(':').length === 3) {
+                            // Format HH:MM:SS
+                            isoTimeString = timePart;
+                        } else {
+                            // Format HH:MM - füge Sekunden hinzu
+                            isoTimeString = `${timePart}:00`;
+                        }
+                        
+                        dateTime = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${isoTimeString}`);
+                        console.log(`   🔄 Deutsches Format geparst: "${datePart} ${timePart}" → "${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${isoTimeString}"`);
                     }
-                    // Format 2: YYYY-MM-DD HH:MM
-                    else if (dateTimeStr.match(/^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                    // Format 2: YYYY-MM-DD HH:MM:SS oder YYYY-MM-DD HH:MM
+                    else if (dateTimeStr.match(/^\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?/)) {
                         dateTime = new Date(dateTimeStr);
+                        console.log(`   🔄 ISO Format geparst: "${dateTimeStr}"`);
                     }
                     // Fallback: Versuche native Parsing
                     else {
+                        console.log(`   ⚠️ FALLBACK: Kein Regex-Match für "${dateTimeStr}", versuche native Parsing...`);
                         dateTime = new Date(dateTimeStr);
                     }
 
