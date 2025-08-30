@@ -37,7 +37,9 @@ class IntelligentRoutePlanner {
     const { regions, fixedAppointments } = this.clusterByRegion(geoAppointments);
     const week = this.initializeWeek(weekStart);
 
-    console.log(`📅 WOCHE INITIALISIERT:`, week.map(d => `${d.day} (${d.date}) - ${d.isPastDay ? 'VERGANGENHEIT' : 'OK'}`));
+    // Einfaches Logging ohne komplexe Array-Operationen
+    const pastDays = week.filter(d => d.isPastDay).length;
+    console.log(`📅 WOCHE INITIALISIERT: ${pastDays} vergangene Tage von 5`);
 
     // Feste Termine unverrückbar einplanen
     this.scheduleFixedAppointments(week, fixedAppointments);
@@ -673,10 +675,6 @@ class IntelligentRoutePlanner {
       
       // WICHTIG: Markiere vergangene Tage
       const isPastDay = dayDate < today;
-      
-      if (isPastDay) {
-        console.log(`⏰ WARNUNG: Tag ${name} (${dateString}) liegt in der Vergangenheit!`);
-      }
       
       return {
         day: name,
