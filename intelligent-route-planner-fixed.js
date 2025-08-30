@@ -24,18 +24,8 @@ class IntelligentRoutePlanner {
       appointmentDuration: 3,  // 3h pro Dreh
       homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
       
-      // REALISTISCHE ROUTENPLANUNG - Überarbeitet
-      baseTravelPadding: 0.5,     // 30min Basispuffer (Parkplatzsuche, Aufbau)
-      trafficPadding: 0.15,       // 15% zusätzlich für Verkehr/Stau
-      longDistancePadding: 0.25,  // 25% extra für Strecken >2h
-      overnightThresholdKm: 120,  // Heimfahrt vermeiden, wenn >120 km
-      
-      // Geschwindigkeitsprofile nach Distanz
-      speedProfile: {
-        city: { maxKm: 50, avgSpeed: 35 },      // Stadtverkehr
-        regional: { maxKm: 150, avgSpeed: 65 }, // Regional/Landstraße
-        highway: { maxKm: 999, avgSpeed: 85 }   // Autobahn/Fernstrecke
-      }
+      // EINFACHE PUFFER-REGEL - Nutze Google Maps Zeit + kleiner Puffer
+      overnightThresholdKm: 120  // Heimfahrt vermeiden, wenn >120 km
     };
   }
 
@@ -306,9 +296,9 @@ class IntelligentRoutePlanner {
       const last = day.appointments.find(a => this.timeToHours(a.endTime) <= from) || null;
       const next = day.appointments.find(a => this.timeToHours(a.startTime) >= to) || null;
 
-      // REALISTISCHE SCHÄTZUNG STATT VEREINFACHUNG
-      const travelInGuess = last ? this.calculateRealisticTravelTime(this.haversineDistance(last.lat, last.lng, appointment.lat, appointment.lng)).duration : 0.75;
-      const travelOutGuess = next ? this.calculateRealisticTravelTime(this.haversineDistance(appointment.lat, appointment.lng, next.lat, next.lng)).duration : 0.75;
+      // EINFACHE SCHÄTZUNG FÜR SLOT-SUCHE
+      const travelInGuess = last ? (this.haversineDistance(last.lat, last.lng, appointment.lat, appointment.lng) * 1.2 / 75 + this.calculateSimpleTravelPadding(this.haversineDistance(last.lat, last.lng, appointment.lat, appointment.lng) * 1.2 / 75)) : 0.5;
+      const travelOutGuess = next ? (this.haversineDistance(appointment.lat, appointment.lng, next.lat, next.lng) * 1.2 / 75 + this.calculateSimpleTravelPadding(this.haversineDistance(appointment.lat, appointment.lng, next.lat, next.lng) * 1.2 / 75)) : 0.5;
 
       const earliestStart = this.roundToHalfHourUp(from + travelInGuess);
       const latestEnd = to - travelOutGuess;
@@ -739,31 +729,16 @@ class IntelligentRoutePlanner {
         const durS = (el.duration_in_traffic?.value || el.duration?.value || 0);
         const googleHours = durS / 3600;
         
-        // REALISTISCHE PUFFER-BERECHNUNG AUCH FÜR GOOGLE API
-        let finalDuration = googleHours;
+        // EINFACHE PUFFER-REGEL: Google Maps Zeit + kleiner Puffer
+        const finalDuration = googleHours + this.calculateSimpleTravelPadding(googleHours);
         
-        // Basispuffer (Parkplatz, Aufbau, etc.)
-        finalDuration += this.constraints.baseTravelPadding;
-        
-        // Verkehrspuffer (nur wenn kein Traffic-Data vorhanden)
-        if (!el.duration_in_traffic) {
-          finalDuration += googleHours * this.constraints.trafficPadding;
-        }
-        
-        // Extra-Puffer für lange Strecken (>2h Google-Zeit)
-        if (googleHours > 2) {
-          finalDuration += googleHours * this.constraints.longDistancePadding;
-        }
-        
-        console.log(`🗺️ GOOGLE MAPS: ${dist.toFixed(1)}km → ${googleHours.toFixed(2)}h + Puffer = ${finalDuration.toFixed(2)}h (Traffic: ${!!el.duration_in_traffic})`);
+        console.log(`🗺️ GOOGLE MAPS: ${dist.toFixed(1)}km → ${googleHours.toFixed(2)}h + ${(finalDuration-googleHours).toFixed(2)}h Puffer = ${finalDuration.toFixed(2)}h`);
         
         const result = { 
           distance: dist, 
           duration: finalDuration, 
           realtime: true, 
-          traffic_considered: !!el.duration_in_traffic,
-          google_base_hours: googleHours,
-          padding_added: finalDuration - googleHours
+          traffic_considered: !!el.duration_in_traffic
         };
         this.distanceCache.set(key, result);
         await this.saveDistanceToDB(from, to, result);
@@ -773,14 +748,13 @@ class IntelligentRoutePlanner {
       // still fall back
     }
 
-    // REALISTISCHE FALLBACK-BERECHNUNG
-    const realisticResult = this.calculateRealisticTravelTime(directKm);
+    // EINFACHE FALLBACK-BERECHNUNG: Google Maps Schätzung + Puffer
+    const estimatedHours = directKm * 1.2 / 75; // 1.2x Straßenfaktor, 75km/h Schnitt
     const fallback = { 
-      distance: realisticResult.distance, 
-      duration: realisticResult.duration, 
+      distance: directKm * 1.2, 
+      duration: estimatedHours + this.calculateSimpleTravelPadding(estimatedHours), 
       approximated: true, 
-      fallback: true,
-      calculation_method: 'realistic_profile'
+      fallback: true
     };
     this.distanceCache.set(key, fallback);
     await this.saveDistanceToDB(from, to, fallback);
@@ -788,62 +762,24 @@ class IntelligentRoutePlanner {
   }
 
   // -------------------------------------------------------------------
-  // REALISTISCHE FAHRTZEIT-BERECHNUNG
+  // EINFACHE PUFFER-BERECHNUNG
   // -------------------------------------------------------------------
-  calculateRealisticTravelTime(airlineKm) {
-    // 1. Realistische Straßendistanz basierend auf Entfernung
-    let roadFactor;
-    if (airlineKm < 20) {
-      roadFactor = 1.4; // Stadtverkehr: viele Umwege
-    } else if (airlineKm < 100) {
-      roadFactor = 1.25; // Regional: moderate Umwege  
-    } else {
-      roadFactor = 1.15; // Fernstrecke: meist direkte Autobahn
+  calculateSimpleTravelPadding(baseHours) {
+    // EINFACHE REGEL: 
+    // 15min Fahrt → 5min Puffer
+    // 1h Fahrt → 15min Puffer  
+    // 3h Fahrt → 30min Puffer
+    // Max 30min Puffer
+    
+    if (baseHours <= 0.25) {        // ≤ 15min
+      return 5/60; // 5min
+    } else if (baseHours <= 1) {    // ≤ 1h
+      return 15/60; // 15min
+    } else if (baseHours <= 2) {    // ≤ 2h
+      return 20/60; // 20min
+    } else {                        // > 2h
+      return 30/60; // 30min max
     }
-    
-    const roadKm = airlineKm * roadFactor;
-    
-    // 2. Geschwindigkeitsprofil wählen
-    let avgSpeed;
-    if (roadKm <= this.constraints.speedProfile.city.maxKm) {
-      avgSpeed = this.constraints.speedProfile.city.avgSpeed;
-    } else if (roadKm <= this.constraints.speedProfile.regional.maxKm) {
-      avgSpeed = this.constraints.speedProfile.regional.avgSpeed;
-    } else {
-      avgSpeed = this.constraints.speedProfile.highway.avgSpeed;
-    }
-    
-    // 3. Grundfahrzeit berechnen
-    const baseHours = roadKm / avgSpeed;
-    
-    // 4. Realistische Puffer hinzufügen
-    let totalHours = baseHours;
-    
-    // Basispuffer (Parkplatz, Aufbau, etc.)
-    totalHours += this.constraints.baseTravelPadding;
-    
-    // Verkehrspuffer (prozentual)
-    totalHours += baseHours * this.constraints.trafficPadding;
-    
-    // Extra-Puffer für lange Strecken (>2h Grundfahrzeit)
-    if (baseHours > 2) {
-      totalHours += baseHours * this.constraints.longDistancePadding;
-    }
-    
-    console.log(`🚗 REALISTISCHE FAHRTZEIT: ${airlineKm.toFixed(1)}km Luftlinie → ${roadKm.toFixed(1)}km Straße @ ${avgSpeed}km/h = ${baseHours.toFixed(2)}h + Puffer = ${totalHours.toFixed(2)}h`);
-    
-    return {
-      distance: roadKm,
-      duration: totalHours,
-      breakdown: {
-        airline_km: airlineKm,
-        road_km: roadKm,
-        avg_speed: avgSpeed,
-        base_hours: baseHours,
-        total_hours: totalHours,
-        padding_added: totalHours - baseHours
-      }
-    };
   }
 
   // -------------------------------------------------------------------
