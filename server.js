@@ -2263,6 +2263,11 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                 priority = 'hoch';
             }
 
+            console.log(`🔧 APPOINTMENT VERARBEITUNG: ${inviteeName}`);
+            console.log(`   📅 isFixed: ${isFixed} (${typeof isFixed})`);
+            console.log(`   📅 fixedDate: ${fixedDate}`);
+            console.log(`   📅 fixedTime: ${fixedTime}`);
+
             const appointment = {
                 customer: inviteeName,
                 address: fullAddress || 'Adresse nicht verfügbar',
@@ -2270,7 +2275,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                 status: status,
                 duration: 3,
                 pipeline_days: status === 'vorschlag' ? Math.floor(Math.random() * 30) + 1 : 7,
-                is_fixed: isFixed ? 1 : 0,
+                is_fixed: isFixed ? 1 : 0, // Explizit als INTEGER
                 fixed_date: fixedDate,
                 fixed_time: fixedTime,
                 on_hold: null, // Explizit auf null setzen
@@ -2343,6 +2348,8 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                 let insertErrors = [];
 
                 processedAppointments.forEach((apt, idx) => {
+                    console.log(`💾 DB INSERT: ${apt.customer} - is_fixed: ${apt.is_fixed} (${typeof apt.is_fixed}), fixed_date: ${apt.fixed_date}, fixed_time: ${apt.fixed_time}`);
+                    
                     stmt.run([
                         apt.customer, 
                         apt.address, 
@@ -2363,7 +2370,7 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                             insertErrors.push(`${apt.customer}: ${err.message}`);
                         } else {
                             insertedCount++;
-                            console.log(`✅ Eingefügt: ${apt.customer} (ID: ${this.lastID})`);
+                            console.log(`✅ Eingefügt: ${apt.customer} (ID: ${this.lastID}) - is_fixed wurde als ${apt.is_fixed} gespeichert`);
                         }
                         
                         // Wenn alle Termine verarbeitet wurden
@@ -2391,6 +2398,16 @@ app.post('/api/admin/import-csv', upload.single('csvFile'), (req, res) => {
                                         });
                                     } else {
                                         console.log('✅ CSV Import erfolgreich abgeschlossen!');
+                                        
+                                        // VERIFIKATION: Prüfe tatsächlich gespeicherte fixe Termine
+                                        db.get("SELECT COUNT(*) as fixed_count FROM appointments WHERE is_fixed = 1", (verifyErr, verifyRow) => {
+                                            const actualFixedCount = verifyRow ? verifyRow.fixed_count : 0;
+                                            console.log(`🔍 VERIFIKATION: ${actualFixedCount} fixe Termine tatsächlich in DB gespeichert (erwartet: ${confirmedCount})`);
+                                            
+                                            if (actualFixedCount !== confirmedCount) {
+                                                console.warn(`⚠️ WARNUNG: Diskrepanz bei fixen Terminen! Erwartet: ${confirmedCount}, Gefunden: ${actualFixedCount}`);
+                                            }
+                                        });
                                         
                                         res.json({
                                             success: true,
