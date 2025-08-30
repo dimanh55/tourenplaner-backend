@@ -18,14 +18,14 @@ class IntelligentRoutePlanner {
     this.apiCallsCount = 0;
 
     this.constraints = {
-      maxWorkHoursPerWeek: 40,
-      maxWorkHoursPerDay: 10,
-      workStartTime: 8.5,      // 08:30
-      appointmentDuration: 3,  // 3h pro Dreh
+      maxWorkHoursPerWeek: 100,   // Erhöht: 100h pro Woche (inkl. Fahrtzeit)
+      maxWorkHoursPerDay: 15,     // Erhöht: 15h pro Tag (inkl. Fahrtzeit) - bis 9h Fahrtzeit möglich
+      workStartTime: 8.5,         // 08:30
+      appointmentDuration: 3,     // 3h pro Dreh
       homeBase: { lat: 52.3759, lng: 9.7320, name: 'Hannover' },
       
       // EINFACHE PUFFER-REGEL - Nutze Google Maps Zeit + kleiner Puffer
-      overnightThresholdKm: 120  // Heimfahrt vermeiden, wenn >120 km
+      overnightThresholdKm: 120   // Heimfahrt vermeiden, wenn >120 km
     };
   }
 
@@ -69,7 +69,10 @@ class IntelligentRoutePlanner {
         continue;
       }
       
-      if (weekHours >= this.constraints.maxWorkHoursPerWeek) break;
+      if (weekHours >= this.constraints.maxWorkHoursPerWeek) {
+        console.log(`⚠️ WOCHENLIMIT ERREICHT: ${weekHours.toFixed(1)}h von ${this.constraints.maxWorkHoursPerWeek}h - STOPPE Planung`);
+        break;
+      }
 
       // NEUE LOGIK: Region basierend auf fixen Terminen des Tages bestimmen
       let regionName = 'Mitte'; // Default
@@ -122,8 +125,13 @@ class IntelligentRoutePlanner {
       }
 
       // Flexible Slots des Tages ermitteln (Lücken neben FIX-Terminen)
-      const flexibleCandidates = this.pickFlexibleForDay(day.date, bucket, 6, day.appointments);
+      const flexibleCandidates = this.pickFlexibleForDay(day.date, bucket, 15, day.appointments); // Erhöht auf 15 Kandidaten pro Tag
+      console.log(`📅 TAG ${day.day}: ${flexibleCandidates.length} flexible Kandidaten aus Region ${regionName}, ${bucket.length} verfügbar`);
+      
       const remaining = await this.planDayEfficiently(day, flexibleCandidates, regionName, previousOvernight);
+      
+      console.log(`✅ TAG ${day.day} ABGESCHLOSSEN: ${day.appointments.length} Termine, ${(day.totalHours || 0).toFixed(1)}h Gesamt, ${remaining.length} übrig`);
+      console.log(`📊 WOCHE BISHER: ${weekHours.toFixed(1)}h von ${this.constraints.maxWorkHoursPerWeek}h`);
 
       // Übrig gebliebenes wieder an die Region zurückhängen
       if (remaining && remaining.length) bucket.unshift(...remaining);
@@ -222,6 +230,8 @@ class IntelligentRoutePlanner {
           break;
         }
 
+        console.log(`🔄 TERMIN-CHECK: ${next.customer} - Benötigt: ${(leg.duration + this.constraints.appointmentDuration).toFixed(1)}h, Verfügbar: ${remaining.toFixed(1)}h`);
+        
         if (remaining < (leg.duration + this.constraints.appointmentDuration)) {
           // Fahrt ggf. noch durchführen, um für Overnight zu positionieren
           if (remaining >= leg.duration) {
