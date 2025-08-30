@@ -34,7 +34,17 @@ class IntelligentRoutePlanner {
   async optimizeWeek(appointments, weekStart, driverId) {
     console.log(`🚀 OPTIMIERE WOCHE: ${weekStart}`);
     const geoAppointments = await this.ensureGeocoding(appointments);
+    console.log(`📊 EINGABE: ${appointments.length} Termine, ${geoAppointments.length} geocoded`);
+    
     const { regions, fixedAppointments } = this.clusterByRegion(geoAppointments);
+    console.log(`🏛️ CLUSTERING ERGEBNIS: ${fixedAppointments.length} fixe Termine gefunden`);
+    
+    if (fixedAppointments.length > 0) {
+      console.log('📌 FIXE TERMINE DETAILS:', fixedAppointments.map(apt => 
+        `${apt.customer_company} am ${apt.fixed_date} ${apt.fixed_time} (is_fixed: ${apt.is_fixed})`
+      ));
+    }
+    
     const week = this.initializeWeek(weekStart);
 
     // Einfaches Logging ohne komplexe Array-Operationen
@@ -444,7 +454,11 @@ class IntelligentRoutePlanner {
   // Fixe Termine platzieren (unverrückbar)
   // -------------------------------------------------------------------
   async scheduleFixedAppointments(week, fixedAppointments) {
+    console.log(`📌 SCHEDULE FIXE TERMINE: ${fixedAppointments.length} Termine zu planen`);
+    
     for (const apt of fixedAppointments) {
+      console.log(`🔄 VERARBEITE: ${apt.customer_company} - fixed_date: "${apt.fixed_date}", fixed_time: "${apt.fixed_time}"`);
+      
       // Konvertiere deutsches Datumsformat zu ISO-Format
       let isoDate = apt.fixed_date;
       if (apt.fixed_date && apt.fixed_date.includes('.')) {
@@ -452,12 +466,14 @@ class IntelligentRoutePlanner {
         const parts = apt.fixed_date.split('.');
         if (parts.length === 3) {
           isoDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+          console.log(`📅 DATUM KONVERTIERT: "${apt.fixed_date}" -> "${isoDate}"`);
         }
       }
       
       const idx = week.findIndex(d => d.date === isoDate);
       if (idx < 0) {
-        console.log(`⚠️ Datum nicht gefunden: fixed_date="${apt.fixed_date}" -> isoDate="${isoDate}"`);
+        console.log(`❌ DATUM NICHT GEFUNDEN: fixed_date="${apt.fixed_date}" -> isoDate="${isoDate}"`);
+        console.log(`📅 Verfügbare Wochentage:`, week.map(d => d.date));
         continue;
       }
       
@@ -576,7 +592,12 @@ class IntelligentRoutePlanner {
     };
     const fixed = [];
     for (const apt of appointments) {
-      if (apt.is_fixed && apt.fixed_date) {
+      // WICHTIG: is_fixed kann als String, Number oder Boolean aus der DB kommen
+      const isFixed = apt.is_fixed === 1 || apt.is_fixed === '1' || apt.is_fixed === true;
+      console.log(`🔍 CLUSTER-CHECK: ${apt.customer_company} - is_fixed: ${apt.is_fixed} (${typeof apt.is_fixed}) → isFixed: ${isFixed}, fixed_date: ${apt.fixed_date}`);
+      
+      if (isFixed && apt.fixed_date) {
+        console.log(`✅ FIXE TERMIN ERKANNT: ${apt.customer_company} am ${apt.fixed_date}`);
         fixed.push(apt);
         continue;
       }
