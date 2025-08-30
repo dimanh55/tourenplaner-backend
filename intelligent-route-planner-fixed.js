@@ -190,8 +190,8 @@ class IntelligentRoutePlanner {
         if (!toFirst) {
           console.log(`🚫 ERSTER TERMIN UNERREICHBAR: ${first.customer} (>9h Fahrt)`);
           pending.unshift(first); // Termin zurück in pending
-          break; // Stoppe Tagesplanung
-        }
+          // Kein erster Termin möglich, überspringe zu while-Schleife
+        } else {
         // Abfahrt nicht vor 08:30; runde auf :00/:30
         let departAt = Math.max(this.constraints.workStartTime, currentTime);
         departAt = this.roundToHalfHourUp(departAt);
@@ -200,9 +200,10 @@ class IntelligentRoutePlanner {
                          previousDayOvernight ? previousDayOvernight.city : 'Hannover',
                          this.getCityName(first.address), toFirst, departAt, arriveAt);
 
-        const startAt = this.roundToHalfHourUp(arriveAt);
-        this.placeAppointment(day, first, startAt);
-        planned.push(first);
+          const startAt = this.roundToHalfHourUp(arriveAt);
+          this.placeAppointment(day, first, startAt);
+          planned.push(first);
+        }
       }
 
       // 2) Weitere Termine sequenziell in Reichweite einplanen
